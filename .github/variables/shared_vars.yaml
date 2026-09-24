@@ -1,7 +1,7 @@
 ## The Service name as will be used by the pipeline
 ## For example: JFrog url and artifact name. Dore report, etc.
 ## In case of MonoRepo project, please comment it
-name: 'JANUS-mitigation-check'
+name: 'JANUS-defense-validation'
 
 mots-id: '36889'
 
@@ -65,8 +65,8 @@ go:
 #+--------------------+
 docker:
   repository: 'apm0047460-dkr-group'
-  repository-path: 'vuln-mitigation-check'
-  image-name: 'vuln-mitigation-check-api' # Comment this line when MonoRepo project  
+  repository-path: 'vuln-defense-validation'
+  image-name: 'vuln-defense-validation-api' # Comment this line when MonoRepo project  
 
 #+--------------------+
 #|    Helm            |

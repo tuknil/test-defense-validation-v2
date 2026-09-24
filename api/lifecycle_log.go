@@ -11,7 +11,7 @@ import (
 func logLifecycle(event string, run DurableRun, fields map[string]any) {
 	entry := map[string]any{
 		"event":          event,
-		"capability":     "mitigation-check",
+		"capability":     "defense-validation",
 		"request_id":     run.RequestID,
 		"correlation_id": run.CorrelationID,
 		"run_id":         run.RunID,
@@ -24,7 +24,7 @@ func logLifecycle(event string, run DurableRun, fields map[string]any) {
 	}
 	encoded, err := json.Marshal(entry)
 	if err != nil {
-		log.Printf(`{"event":"lifecycle_log_encoding_failed","capability":"mitigation-check"}`)
+		log.Printf(`{"event":"lifecycle_log_encoding_failed","capability":"defense-validation"}`)
 		return
 	}
 	log.Print(string(encoded))

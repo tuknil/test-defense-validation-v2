@@ -7,11 +7,11 @@ package main
 // Env:
 //   DATABRICKS_DSN      token:<PAT>@<host>[:443]/sql/1.0/warehouses/<id>
 //   DATABRICKS_CATALOG  e.g. 36889_janus_dev
-//   DATABRICKS_SCHEMA   e.g. mitigation-check
-//   DATABRICKS_TABLE    e.g. mitigation_check
+//   DATABRICKS_SCHEMA   e.g. defense-validation
+//   DATABRICKS_TABLE    e.g. defense_validation
 //
 // Table:
-//   create table mitigation_check(run_id string, result_id string,
+//   create table defense_validation(run_id string, result_id string,
 //     result_json STRING, constraint run_pk primary key(run_id, result_id)) using delta
 
 import (
@@ -73,8 +73,8 @@ func NewDatabricksSink() *DatabricksSink {
 	db.SetMaxOpenConns(4)
 
 	catalog := strings.TrimSpace(os.Getenv("DATABRICKS_CATALOG"))
-	schema := firstNonEmpty(strings.TrimSpace(os.Getenv("DATABRICKS_SCHEMA")), "mitigation_check")
-	name := firstNonEmpty(strings.TrimSpace(os.Getenv("DATABRICKS_TABLE")), "mitigation_check")
+	schema := firstNonEmpty(strings.TrimSpace(os.Getenv("DATABRICKS_SCHEMA")), "defense_validation")
+	name := firstNonEmpty(strings.TrimSpace(os.Getenv("DATABRICKS_TABLE")), "defense_validation")
 	if catalog == "" {
 		_ = db.Close()
 		log.Printf("databricks: disabled (DATABRICKS_CATALOG is required for authoritative result references)")
@@ -105,7 +105,7 @@ func (s *DatabricksSink) Publish(ctx context.Context, outcome RunOutcome, payloa
 	if err := validateCanonicalResultPayload(outcome, payload); err != nil {
 		return fmt.Errorf("invalid canonical result payload: %w", err)
 	}
-	// result_id is written as-is (the full "mitigation-check-result:<hex>" value) so
+	// result_id is written as-is (the full "defense-validation-result:<hex>" value) so
 	// consumers query WHERE result_id = <value>; result_ref.key reports the same value.
 	runID := outcome.RunID
 	resultID := outcome.ResultID
@@ -129,7 +129,7 @@ func (s *DatabricksSink) Publish(ctx context.Context, outcome RunOutcome, payloa
 }
 
 // Verify performs readback only. Workers use it after a MERGE may have
-// succeeded so recovery cannot execute the mitigation check or rewrite a row.
+// succeeded so recovery cannot execute the defense validation or rewrite a row.
 func (s *DatabricksSink) Verify(ctx context.Context, outcome RunOutcome, payload []byte) error {
 	if s == nil || outcome.ResultRef == nil {
 		return fmt.Errorf("Databricks result sink is not configured")

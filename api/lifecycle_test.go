@@ -15,14 +15,14 @@ import (
 )
 
 func TestExecutionContextDefaultsToUnboundedAndSupportsMultiHourTimeout(t *testing.T) {
-	t.Setenv("MC_EXECUTION_TIMEOUT", "")
+	t.Setenv("DV_EXECUTION_TIMEOUT", "")
 	ctx, cancel := executionContext(context.Background())
 	defer cancel()
 	if _, hasDeadline := ctx.Deadline(); hasDeadline {
 		t.Fatal("default execution context has a deadline")
 	}
 
-	t.Setenv("MC_EXECUTION_TIMEOUT", "6h")
+	t.Setenv("DV_EXECUTION_TIMEOUT", "6h")
 	ctx, cancel = executionContext(context.Background())
 	defer cancel()
 	deadline, hasDeadline := ctx.Deadline()
@@ -37,7 +37,7 @@ func TestExecutionContextDefaultsToUnboundedAndSupportsMultiHourTimeout(t *testi
 
 func TestCanonicalResultIntegrityExcludesIntegrityFields(t *testing.T) {
 	outcome := RunOutcome{
-		Capability: "mitigation-check", ContractID: contractID, RequestID: "request:integrity",
+		Capability: "defense-validation", ContractID: contractID, RequestID: "request:integrity",
 		RunID: "run:integrity", ResultID: "result:integrity", Status: statusCompleted,
 		TerminalState: stateBlocked, EvidenceRefs: []string{}, CreatedAt: time.Date(2026, 9, 2, 0, 0, 0, 0, time.UTC),
 	}
@@ -63,7 +63,7 @@ func TestCanonicalResultIntegrityExcludesIntegrityFields(t *testing.T) {
 
 func TestSharedProfileCanonicalResultPayloadUsesRFC8785Integrity(t *testing.T) {
 	outcome := RunOutcome{
-		Capability: "mitigation-check", ContractID: contractID, RequestID: "request:shared-integrity",
+		Capability: "defense-validation", ContractID: contractID, RequestID: "request:shared-integrity",
 		RunID: "run:shared-integrity", ResultID: "result:shared-integrity", Status: statusCompleted,
 		TerminalState: stateBlocked, ProfileID: sharedV2ProfileID, EvidenceRefs: []string{},
 		CreatedAt:  time.Date(2026, 9, 14, 0, 0, 0, 0, time.UTC),
@@ -81,11 +81,11 @@ func TestSharedProfileCanonicalResultPayloadUsesRFC8785Integrity(t *testing.T) {
 	}
 }
 
-func validLifecycleRequest(id string) SubmitMitigationCheckRequest {
+func validLifecycleRequest(id string) SubmitDefenseValidationRequest {
 	blocked := true
 	testBasis, _ := json.Marshal(TestBasisSpec{Kind: "http-request-attack", ProofBasis: "mitigation-discriminator", Expected: TestExpected{Blocked: &blocked}})
 	candidate, _ := json.Marshal(CandidateSpec{Kind: "waf-rule", Rule: `SecRule REQUEST_BODY "@rx attack" "deny,status:403"`})
-	return SubmitMitigationCheckRequest{ContractID: contractID, RequestID: id, CorrelationID: "correlation-1",
+	return SubmitDefenseValidationRequest{ContractID: contractID, RequestID: id, CorrelationID: "correlation-1",
 		CandidateArtifactID: "candidate-1", TestBasisID: "basis-1", CheckProfileID: "profile-1",
 		ExecutionMode: execInMemory, Candidate: candidate, TestBasis: testBasis}
 }
@@ -97,7 +97,7 @@ func TestNormalizedRequestIgnoresJSONFormatting(t *testing.T) {
 		t.Fatal(err)
 	}
 	data, _ := json.MarshalIndent(req, "", "  ")
-	var decoded SubmitMitigationCheckRequest
+	var decoded SubmitDefenseValidationRequest
 	if err := json.Unmarshal(data, &decoded); err != nil {
 		t.Fatal(err)
 	}
@@ -112,7 +112,7 @@ func TestNormalizedRequestIgnoresJSONFormatting(t *testing.T) {
 
 func TestAsyncSubmitRequiresLifecycleHeaders(t *testing.T) {
 	body, _ := json.Marshal(validLifecycleRequest("request-1"))
-	req := httptest.NewRequest(http.MethodPost, "/v1/mitigation-check-runs", bytes.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/v1/defense-validation-runs", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	response := httptest.NewRecorder()
 	handleAsyncSubmit(response, req)
@@ -123,7 +123,7 @@ func TestAsyncSubmitRequiresLifecycleHeaders(t *testing.T) {
 
 func TestAsyncSubmitRejectsIdentityMismatchBeforePersistence(t *testing.T) {
 	body, _ := json.Marshal(validLifecycleRequest("body-request"))
-	req := httptest.NewRequest(http.MethodPost, "/v1/mitigation-check-runs", bytes.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/v1/defense-validation-runs", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Idempotency-Key", "header-request")
 	req.Header.Set("X-Correlation-ID", "correlation-1")
@@ -136,9 +136,9 @@ func TestAsyncSubmitRejectsIdentityMismatchBeforePersistence(t *testing.T) {
 
 func integrationStore(t *testing.T) *RunStore {
 	t.Helper()
-	dsn := os.Getenv("MC_TEST_DATABASE_URL")
+	dsn := os.Getenv("DV_TEST_DATABASE_URL")
 	if dsn == "" {
-		t.Skip("MC_TEST_DATABASE_URL is not configured")
+		t.Skip("DV_TEST_DATABASE_URL is not configured")
 	}
 	t.Setenv("DATABASE_URL", dsn)
 	s, err := NewRunStore()
@@ -159,7 +159,7 @@ func durableFixture(t *testing.T, requestID string) DurableRun {
 	now := time.Now().UTC()
 	resultID := resultIDPrefix + newID()
 	return DurableRun{RunStatus: RunStatus{RequestID: requestID, CorrelationID: req.CorrelationID,
-		RunID: "mc-run-" + newID(), ResultID: &resultID, CreatedAt: now, UpdatedAt: now},
+		RunID: "dv-run-" + newID(), ResultID: &resultID, CreatedAt: now, UpdatedAt: now},
 		Request: raw, RequestDigest: digest}
 }
 
@@ -167,7 +167,7 @@ func TestPostgresLifecycleIdempotencyLeaseCancellationAndRecovery(t *testing.T) 
 	s := integrationStore(t)
 	ctx := context.Background()
 	run := durableFixture(t, "test-"+newID())
-	t.Cleanup(func() { _, _ = s.db.Exec(`DELETE FROM mitigation_check_run WHERE request_id=$1`, run.RequestID) })
+	t.Cleanup(func() { _, _ = s.db.Exec(`DELETE FROM defense_validation_run WHERE request_id=$1`, run.RequestID) })
 	created, isNew, err := s.CreateOrGet(ctx, run)
 	if err != nil || !isNew {
 		t.Fatalf("first create: new=%t err=%v", isNew, err)
@@ -196,11 +196,11 @@ func TestPostgresLifecycleIdempotencyLeaseCancellationAndRecovery(t *testing.T) 
 	}
 
 	stale := durableFixture(t, "test-"+newID())
-	t.Cleanup(func() { _, _ = s.db.Exec(`DELETE FROM mitigation_check_run WHERE request_id=$1`, stale.RequestID) })
+	t.Cleanup(func() { _, _ = s.db.Exec(`DELETE FROM defense_validation_run WHERE request_id=$1`, stale.RequestID) })
 	if _, _, err := s.CreateOrGet(ctx, stale); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.db.Exec(`UPDATE mitigation_check_run SET status='running',attempt=3,lease_expires_at=now()-interval '1 second' WHERE run_id=$1`, stale.RunID); err != nil {
+	if _, err := s.db.Exec(`UPDATE defense_validation_run SET status='running',attempt=3,lease_expires_at=now()-interval '1 second' WHERE run_id=$1`, stale.RunID); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.FailExhausted(ctx, 3); err != nil {
@@ -218,11 +218,11 @@ func TestAsyncHTTPSubmissionIdempotencyConflictAndQueuedCancellation(t *testing.
 	store = s
 	t.Cleanup(func() { store = previousStore })
 	requestID := "test-" + newID()
-	t.Cleanup(func() { _, _ = s.db.Exec(`DELETE FROM mitigation_check_run WHERE request_id=$1`, requestID) })
+	t.Cleanup(func() { _, _ = s.db.Exec(`DELETE FROM defense_validation_run WHERE request_id=$1`, requestID) })
 
-	submit := func(req SubmitMitigationCheckRequest) *httptest.ResponseRecorder {
+	submit := func(req SubmitDefenseValidationRequest) *httptest.ResponseRecorder {
 		body, _ := json.Marshal(req)
-		httpRequest := httptest.NewRequest(http.MethodPost, "/v1/mitigation-check-runs", bytes.NewReader(body))
+		httpRequest := httptest.NewRequest(http.MethodPost, "/v1/defense-validation-runs", bytes.NewReader(body))
 		httpRequest.Header.Set("Content-Type", "application/json")
 		httpRequest.Header.Set("Idempotency-Key", requestID)
 		httpRequest.Header.Set("X-Correlation-ID", "correlation-1")
@@ -254,14 +254,14 @@ func TestAsyncHTTPSubmissionIdempotencyConflictAndQueuedCancellation(t *testing.
 	if conflict.Code != http.StatusConflict || !strings.Contains(conflict.Body.String(), "idempotency_conflict") {
 		t.Fatalf("conflict status=%d body=%s", conflict.Code, conflict.Body.String())
 	}
-	resultRequest := httptest.NewRequest(http.MethodGet, "/v1/mitigation-check-runs/"+accepted.RunID+"/result", nil)
+	resultRequest := httptest.NewRequest(http.MethodGet, "/v1/defense-validation-runs/"+accepted.RunID+"/result", nil)
 	resultResponse := httptest.NewRecorder()
 	handleRunResult(resultResponse, resultRequest, accepted.RunID)
 	if resultResponse.Code != http.StatusConflict || !strings.Contains(resultResponse.Body.String(), "run_not_terminal") {
 		t.Fatalf("pre-terminal result status=%d body=%s", resultResponse.Code, resultResponse.Body.String())
 	}
 	for i := 0; i < 2; i++ {
-		cancelRequest := httptest.NewRequest(http.MethodPost, "/v1/mitigation-check-runs/"+accepted.RunID+"/cancel", nil)
+		cancelRequest := httptest.NewRequest(http.MethodPost, "/v1/defense-validation-runs/"+accepted.RunID+"/cancel", nil)
 		cancelResponse := httptest.NewRecorder()
 		handleRunCancel(cancelResponse, cancelRequest, accepted.RunID)
 		if cancelResponse.Code != http.StatusOK || !strings.Contains(cancelResponse.Body.String(), `"status":"canceled"`) {
@@ -274,7 +274,7 @@ func TestPostgresCompletionIsImmutable(t *testing.T) {
 	s := integrationStore(t)
 	ctx := context.Background()
 	run := durableFixture(t, "test-"+newID())
-	t.Cleanup(func() { _, _ = s.db.Exec(`DELETE FROM mitigation_check_run WHERE request_id=$1`, run.RequestID) })
+	t.Cleanup(func() { _, _ = s.db.Exec(`DELETE FROM defense_validation_run WHERE request_id=$1`, run.RequestID) })
 	if _, _, err := s.CreateOrGet(ctx, run); err != nil {
 		t.Fatal(err)
 	}
@@ -282,10 +282,10 @@ func TestPostgresCompletionIsImmutable(t *testing.T) {
 	if err != nil || !ok {
 		t.Fatalf("lease ok=%t err=%v", ok, err)
 	}
-	outcome := RunOutcome{Capability: "mitigation-check", ContractID: contractID, RequestID: run.RequestID,
+	outcome := RunOutcome{Capability: "defense-validation", ContractID: contractID, RequestID: run.RequestID,
 		RunID: run.RunID, ResultID: *run.ResultID, Status: statusCompleted, TerminalState: stateBlocked,
 		CorrelationID: run.CorrelationID, EvidenceRefs: []string{}, CreatedAt: time.Now().UTC()}
-	outcome.ResultRef = &ResultRef{System: "databricks", Catalog: "catalog", Schema: "mitigation_check", Table: "results", Key: outcome.ResultID}
+	outcome.ResultRef = &ResultRef{System: "databricks", Catalog: "catalog", Schema: "defense_validation", Table: "results", Key: outcome.ResultID}
 	if err := setCanonicalIntegrity(&outcome); err != nil {
 		t.Fatal(err)
 	}

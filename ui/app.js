@@ -2,10 +2,10 @@
 
 // Default mitigation scenario with the actual log4j artifacts inlined.
 const SCENARIO = {
-  contract_id: "mitigation-check@1.0",
+  contract_id: "defense-validation@1.0",
   candidate_artifact_id: "candidate:log4shell:waf-rule:1",
   test_basis_id: "test-basis:log4shell:true-positive:1",
-  check_profile_id: "mitigation-check-profile:waf-http:1",
+  check_profile_id: "defense-validation-profile:waf-http:1",
   substrate_selector: "substrate:log4j-vulnerable-webserver:container",
   substrate: {
     kind: "container-image",
@@ -110,7 +110,7 @@ function setStatus(state, text) {
 async function loadRuns() {
   let runs;
   try {
-    const res = await fetch(apiBase() + "/v1/compat/mitigation-check-runs");
+    const res = await fetch(apiBase() + "/v1/compat/defense-validation-runs");
     runs = await res.json();
   } catch (err) {
     runListEl.innerHTML = `<li class="run-empty">Cannot reach API.</li>`;
@@ -157,7 +157,7 @@ async function selectRun(runId) {
   detailEl.innerHTML = `<p class="detail-empty">Loading ${esc(runId)}…</p>`;
   let rec;
   try {
-    const res = await fetch(apiBase() + "/v1/compat/mitigation-check-runs/" + encodeURIComponent(runId));
+    const res = await fetch(apiBase() + "/v1/compat/defense-validation-runs/" + encodeURIComponent(runId));
     if (!res.ok) throw new Error("HTTP " + res.status);
     rec = await res.json();
   } catch (err) {
@@ -242,7 +242,7 @@ form.addEventListener("submit", async (e) => {
   // The toggle is authoritative for where the substrate runs.
   payload.execution_mode = execMode;
 
-  const url = apiBase() + "/v1/compat/mitigation-check-runs";
+  const url = apiBase() + "/v1/compat/defense-validation-runs";
   submitBtn.disabled = true;
   submitBtn.textContent = "Running scenario…";
   setStatus("idle", "Bringing up the container, applying the WAF rule, running the test… (~20–40s)");
@@ -270,8 +270,8 @@ form.addEventListener("submit", async (e) => {
 });
 
 // ---- Init ----
-// API endpoint comes from the runtime-injected env (window.MC_API_BASE), falling
+// API endpoint comes from the runtime-injected env (window.DV_API_BASE), falling
 // back to localhost for local dev. The field stays editable for manual override.
-apiBaseInput.value = (window.MC_API_BASE || "http://localhost:8137").trim();
+apiBaseInput.value = (window.DV_API_BASE || "http://localhost:8137").trim();
 payloadEl.value = JSON.stringify(SCENARIO, null, 2);
 loadRuns();

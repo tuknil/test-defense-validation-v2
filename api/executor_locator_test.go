@@ -194,7 +194,7 @@ func TestLocatorResolutionRejectsVolumePayloadTamper(t *testing.T) {
 func TestReferenceOnlyValidationIsStrictAndLegacyInlineRemainsValid(t *testing.T) {
 	resolver, defense, check, _ := locatorFixture(t, false)
 	_ = resolver
-	reference := SubmitMitigationCheckRequest{ContractID: contractID, RequestID: "mc-request", CorrelationID: "correlation-1", RoutePolicy: locatorRoutePolicy, DefenseResult: &defense, CheckResult: &check, TestBasisID: "check-artifact:http", ExecutionMode: execInMemory}
+	reference := SubmitDefenseValidationRequest{ContractID: contractID, RequestID: "mc-request", CorrelationID: "correlation-1", RoutePolicy: locatorRoutePolicy, DefenseResult: &defense, CheckResult: &check, TestBasisID: "check-artifact:http", ExecutionMode: execInMemory}
 	if fields := validate(reference); len(fields) != 0 {
 		t.Fatalf("valid locator request fields=%v", fields)
 	}

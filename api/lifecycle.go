@@ -18,7 +18,7 @@ import (
 )
 
 const (
-	submissionContractID = "mitigation-check-run-submission@1.0"
+	submissionContractID = "defense-validation-run-submission@1.0"
 	statusContractID     = "capability-run-status@1.0"
 )
 
@@ -52,7 +52,7 @@ func handleRunsCollection(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleRunItem(w http.ResponseWriter, r *http.Request) {
-	path := strings.Trim(strings.TrimPrefix(r.URL.Path, "/v1/mitigation-check-runs/"), "/")
+	path := runIDFromPath(r.URL.Path, runsPath)
 	parts := strings.Split(path, "/")
 	if path == "" || len(parts) > 2 {
 		writeLifecycleError(w, http.StatusNotFound, "run_not_found", "Run not found", false)
@@ -110,7 +110,7 @@ func handleAsyncSubmit(w http.ResponseWriter, r *http.Request) {
 	}
 	normalizeRequestDefaults(&req)
 	if fields := validate(req); len(fields) > 0 {
-		writeLifecycleError(w, http.StatusBadRequest, "invalid_request", "Request does not satisfy mitigation-check@1.0: "+strings.Join(fields, ", "), false)
+		writeLifecycleError(w, http.StatusBadRequest, "invalid_request", "Request does not satisfy defense-validation@1.0: "+strings.Join(fields, ", "), false)
 		return
 	}
 	if req.Callback != nil {
@@ -124,15 +124,15 @@ func handleAsyncSubmit(w http.ResponseWriter, r *http.Request) {
 	}
 	now := time.Now().UTC()
 	resultID := resultIDPrefix + newID()
-	run := DurableRun{RunStatus: RunStatus{Capability: "mitigation-check", ContractID: statusContractID,
-		RequestID: req.RequestID, CorrelationID: req.CorrelationID, RunID: "mc-run-" + newID(), Status: statusQueued,
+	run := DurableRun{RunStatus: RunStatus{Capability: "defense-validation", ContractID: statusContractID,
+		RequestID: req.RequestID, CorrelationID: req.CorrelationID, RunID: "dv-run-" + newID(), Status: statusQueued,
 		ResultID: &resultID, CreatedAt: now, UpdatedAt: now, Progress: Progress{Phase: "queued", Message: "Awaiting worker"}},
 		Request: normalized, RequestDigest: digest}
 	if callback.URL != "" {
 		run.CallbackURL = callback.URL
 		run.CallbackWorkflowID = callback.WorkflowID
 		run.CallbackSignal = callback.Signal
-		run.CallbackEventID = "mitigation-check:" + run.RunID + ":terminal:v1"
+		run.CallbackEventID = "defense-validation:" + run.RunID + ":terminal:v1"
 		if strings.TrimSpace(os.Getenv("CAPABILITY_CALLBACK_TOKEN")) == "" {
 			log.Printf("callback_configuration_error request_id=%q reason=%q", req.RequestID, "CAPABILITY_CALLBACK_TOKEN is not configured")
 		}
@@ -166,7 +166,7 @@ func handleAsyncSubmit(w http.ResponseWriter, r *http.Request) {
 	logLifecycle("run_submitted", stored, map[string]any{"created": created})
 }
 
-func normalizeRequestDefaults(req *SubmitMitigationCheckRequest) {
+func normalizeRequestDefaults(req *SubmitDefenseValidationRequest) {
 	if req.ExecutionMode == "" {
 		req.ExecutionMode = execInMemory
 	}
@@ -191,7 +191,7 @@ func normalizeRequestDefaults(req *SubmitMitigationCheckRequest) {
 	}
 }
 
-func normalizedRequest(req SubmitMitigationCheckRequest) (json.RawMessage, string, error) {
+func normalizedRequest(req SubmitDefenseValidationRequest) (json.RawMessage, string, error) {
 	data, err := json.Marshal(req)
 	if err != nil {
 		return nil, "", err
@@ -211,9 +211,9 @@ func normalizedRequest(req SubmitMitigationCheckRequest) (json.RawMessage, strin
 }
 
 func submissionFrom(run DurableRun) SubmissionResponse {
-	return SubmissionResponse{Capability: "mitigation-check", ContractID: submissionContractID,
+	return SubmissionResponse{Capability: "defense-validation", ContractID: submissionContractID,
 		RequestID: run.RequestID, CorrelationID: run.CorrelationID, RunID: run.RunID, Status: run.Status,
-		StatusURL: "/v1/mitigation-check-runs/" + run.RunID, ResultURL: "/v1/mitigation-check-runs/" + run.RunID + "/result", AcceptedAt: run.CreatedAt}
+		StatusURL: runsPath + "/" + run.RunID, ResultURL: runsPath + "/" + run.RunID + "/result", AcceptedAt: run.CreatedAt}
 }
 
 func handleRunStatus(w http.ResponseWriter, r *http.Request, id string) {
@@ -309,20 +309,20 @@ func writeLifecycleError(w http.ResponseWriter, status int, code, detail string,
 }
 
 func executionContext(parent context.Context) (context.Context, context.CancelFunc) {
-	raw := strings.TrimSpace(os.Getenv("MC_EXECUTION_TIMEOUT"))
+	raw := strings.TrimSpace(os.Getenv("DV_EXECUTION_TIMEOUT"))
 	if raw == "" || raw == "0" {
 		return context.WithCancel(parent)
 	}
 	timeout, err := time.ParseDuration(raw)
 	if err != nil || timeout <= 0 {
-		log.Printf("invalid MC_EXECUTION_TIMEOUT %q; execution timeout disabled", raw)
+		log.Printf("invalid DV_EXECUTION_TIMEOUT %q; execution timeout disabled", raw)
 		return context.WithCancel(parent)
 	}
 	return context.WithTimeout(parent, timeout)
 }
 
 func executeDurableRun(ctx context.Context, run DurableRun) (RunOutcome, error) {
-	var req SubmitMitigationCheckRequest
+	var req SubmitDefenseValidationRequest
 	if err := json.Unmarshal(run.Request, &req); err != nil {
 		return RunOutcome{}, fmt.Errorf("decode persisted request: %w", err)
 	}
@@ -345,7 +345,7 @@ func executeDurableRun(ctx context.Context, run DurableRun) (RunOutcome, error) 
 	return out, nil
 }
 
-func executeRequestedScenario(ctx context.Context, req SubmitMitigationCheckRequest, runID, resultID string) RunOutcome {
+func executeRequestedScenario(ctx context.Context, req SubmitDefenseValidationRequest, runID, resultID string) RunOutcome {
 	if v2LocatorMode(req) {
 		return executeSharedContractV2(ctx, req, runID, resultID)
 	}

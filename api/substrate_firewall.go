@@ -39,7 +39,7 @@ type FWConnection struct {
 	DstPort  int    `json:"dst_port"`
 }
 
-func runFirewallInMemory(ctx context.Context, req SubmitMitigationCheckRequest, out RunOutcome) RunOutcome {
+func runFirewallInMemory(ctx context.Context, req SubmitDefenseValidationRequest, out RunOutcome) RunOutcome {
 	var cand CandidateSpec
 	if err := json.Unmarshal(nonNil(req.Candidate), &cand); err != nil || strings.TrimSpace(cand.Rule) == "" {
 		return couldNotTest(out, "firewall rule not provided in request body (candidate.rule)")

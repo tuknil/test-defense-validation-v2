@@ -24,4 +24,4 @@ jobs:
     steps:
     - uses: actions/checkout@v4
     - name: Build the Docker image
-      run: docker build . --file ./ui/Dockerfile --tag artifact.it.att.com/apm0047460-dkr-group/vuln-mitigation-check/vuln-mitigation-check-ui:$(date +%s)
+      run: docker build . --file ./ui/Dockerfile --tag artifact.it.att.com/apm0047460-dkr-group/vuln-defense-validation/vuln-defense-validation-ui:$(date +%s)

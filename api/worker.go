@@ -177,7 +177,7 @@ func (w *RunWorker) executeOne(parent context.Context, run DurableRun) {
 		return
 	}
 	if err != nil {
-		failure := RunFailure{Code: "execution_failed", Detail: "Mitigation check execution failed", Retryable: false}
+		failure := RunFailure{Code: "execution_failed", Detail: "Defense validation execution failed", Retryable: false}
 		written, transitionErr := w.store.Fail(parent, run.RunID, w.workerID, run.LeaseToken, failure)
 		logLifecycle("run_failed", run, map[string]any{
 			"failure_code": failure.Code, "error": err.Error(), "transition_written": written, "transition_error": errorString(transitionErr),
@@ -185,7 +185,7 @@ func (w *RunWorker) executeOne(parent context.Context, run DurableRun) {
 		return
 	}
 	if outcome.TerminalState == stateMalfunction {
-		failure := RunFailure{Code: "mitigation_check_malfunction", Detail: "Mitigation check reported a malfunction", Retryable: false}
+		failure := RunFailure{Code: "defense_validation_malfunction", Detail: "Defense validation reported a malfunction", Retryable: false}
 		written, transitionErr := w.store.FailOutcome(parent, run.RunID, w.workerID, run.LeaseToken, outcome, failure)
 		logLifecycle("run_failed", run, map[string]any{
 			"failure_code": failure.Code, "transition_written": written, "transition_error": errorString(transitionErr),

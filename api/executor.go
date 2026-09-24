@@ -32,7 +32,7 @@ import (
 )
 
 // RunOutcome is the executed result surfaced to the UI (a pragmatic superset of
-// MitigationCheckResult@1, LLD §10.2). The leading fields are the result envelope;
+// DefenseValidationResult@1, LLD §10.2). The leading fields are the result envelope;
 // the trailing fields are the full verdict detail (appended, not replaced).
 type RunOutcome struct {
 	Capability        string                  `json:"capability"`
@@ -84,9 +84,9 @@ type ResultRef struct {
 }
 
 // resultIDPrefix is the prefix on the run's result_id (so result_id looks like
-// "mitigation-check-result:<hex>"). The full result_id — prefix included — is what
+// "defense-validation-result:<hex>"). The full result_id — prefix included — is what
 // is written to the Databricks result_id column and placed in result_ref.key.
-const resultIDPrefix = "mitigation-check-result:"
+const resultIDPrefix = "defense-validation-result:"
 
 type Expected struct {
 	Classification string `json:"classification"`
@@ -141,7 +141,7 @@ type substrateRunner func(ctx context.Context, out *RunOutcome, sub SubstrateSpe
 
 // executeScenario runs the full bring-up → apply → test → observe → teardown loop.
 // It requires the inline substrate/candidate/test_basis bodies to be present.
-func executeScenario(ctx context.Context, req SubmitMitigationCheckRequest, runID, resultID string) RunOutcome {
+func executeScenario(ctx context.Context, req SubmitDefenseValidationRequest, runID, resultID string) RunOutcome {
 	out := RunOutcome{RunID: runID, ResultID: resultID}
 
 	mode := req.ExecutionMode
@@ -532,7 +532,7 @@ func urlDecode(s string) string {
 
 // bringUpLocalSubstrate runs the substrate on the host Docker daemon (docker.sock).
 //   - network mode (containerized API): attach to a shared docker network
-//     (MC_SUBSTRATE_NETWORK) and reach it by container name:8080.
+//     (DV_SUBSTRATE_NETWORK) and reach it by container name:8080.
 //   - local mode: publish on 127.0.0.1:<free-port>.
 func bringUpLocalSubstrate(ctx context.Context, out *RunOutcome, sub SubstrateSpec, runID string) (*substrate, string) {
 	if err := dockerAvailable(ctx); err != nil {
@@ -540,7 +540,7 @@ func bringUpLocalSubstrate(ctx context.Context, out *RunOutcome, sub SubstrateSp
 	}
 	out.Steps = append(out.Steps, "docker available")
 
-	network := os.Getenv("MC_SUBSTRATE_NETWORK")
+	network := os.Getenv("DV_SUBSTRATE_NETWORK")
 	var cid, base string
 	if network != "" {
 		name := runID // unique per submit → safe container name on the network

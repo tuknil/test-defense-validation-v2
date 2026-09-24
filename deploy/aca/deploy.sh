@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Deploy mitigation-check (API + UI) to Azure Container Apps.
+# Deploy defense-validation (API + UI) to Azure Container Apps.
 #
 # ACA has no host Docker socket, so the `local` execution mode is unavailable;
 # use inmemory / aci / aci-sp / github / github-ghcr (all daemonless). See
@@ -17,8 +17,8 @@ set -euo pipefail
 RG="${RG:-mc-nonprod-rg}"
 LOCATION="${LOCATION:-eastus}"
 ENVIRONMENT="${ENVIRONMENT:-mc-aca-env}"
-API_IMAGE="${API_IMAGE:-ghcr.io/tuknil/mitigation-check-api:latest}"
-UI_IMAGE="${UI_IMAGE:-ghcr.io/tuknil/mitigation-check-ui:latest}"
+API_IMAGE="${API_IMAGE:-ghcr.io/tuknil/defense-validation-api:latest}"
+UI_IMAGE="${UI_IMAGE:-ghcr.io/tuknil/defense-validation-ui:latest}"
 
 # ---- substrate execution config ----
 SUBSCRIPTION_ID="$(az account show --query id -o tsv)"
@@ -58,7 +58,7 @@ fi
 
 echo "==> API container app (system-assigned identity)"
 az containerapp create \
-  -n mitigation-api -g "$RG" --environment "$ENVIRONMENT" \
+  -n defense-validation-api -g "$RG" --environment "$ENVIRONMENT" \
   --image "$API_IMAGE" \
   --ingress external --target-port 8137 \
   --system-assigned \
@@ -72,34 +72,34 @@ az containerapp create \
     "CAPABILITY_CALLBACK_TOKEN=secretref:capability-callback-token" \
     "CAPABILITY_CALLBACK_ALLOWED_HOSTS=$CAPABILITY_CALLBACK_ALLOWED_HOSTS" \
     "AZURE_SUBSCRIPTION_ID=$SUBSCRIPTION_ID" \
-    "MC_ACI_RESOURCE_GROUP=$ACI_RG" \
-    "MC_ACI_REGION=$ACI_REGION" \
+    "DV_ACI_RESOURCE_GROUP=$ACI_RG" \
+    "DV_ACI_REGION=$ACI_REGION" \
   -o none
 
 # github / github-ghcr (optional)
 if [ -n "$GITHUB_TOKEN" ]; then
   echo "==> wiring github secrets"
-  az containerapp secret set -n mitigation-api -g "$RG" --secrets "github-token=$GITHUB_TOKEN" -o none
-  az containerapp update -n mitigation-api -g "$RG" \
+  az containerapp secret set -n defense-validation-api -g "$RG" --secrets "github-token=$GITHUB_TOKEN" -o none
+  az containerapp update -n defense-validation-api -g "$RG" \
     --set-env-vars "GITHUB_REPO=$GITHUB_REPO" "GITHUB_TOKEN=secretref:github-token" -o none
 fi
 
 # aci-sp (optional)
 if [ -n "$AZURE_CLIENT_SECRET" ]; then
   echo "==> wiring service-principal secrets"
-  az containerapp secret set -n mitigation-api -g "$RG" --secrets "azure-client-secret=$AZURE_CLIENT_SECRET" -o none
-  az containerapp update -n mitigation-api -g "$RG" \
+  az containerapp secret set -n defense-validation-api -g "$RG" --secrets "azure-client-secret=$AZURE_CLIENT_SECRET" -o none
+  az containerapp update -n defense-validation-api -g "$RG" \
     --set-env-vars "AZURE_TENANT_ID=$AZURE_TENANT_ID" "AZURE_CLIENT_ID=$AZURE_CLIENT_ID" "AZURE_CLIENT_SECRET=secretref:azure-client-secret" -o none
 fi
 
 echo "==> grant the API managed identity Contributor on the ACI resource group (aci mode)"
-API_MI="$(az containerapp show -n mitigation-api -g "$RG" --query identity.principalId -o tsv)"
+API_MI="$(az containerapp show -n defense-validation-api -g "$RG" --query identity.principalId -o tsv)"
 az role assignment create --assignee "$API_MI" --role Contributor \
   --scope "/subscriptions/$SUBSCRIPTION_ID/resourceGroups/$ACI_RG" -o none || true
 
 echo "==> UI container app"
 az containerapp create \
-  -n mitigation-ui -g "$RG" --environment "$ENVIRONMENT" \
+  -n defense-validation-ui -g "$RG" --environment "$ENVIRONMENT" \
   --image "$UI_IMAGE" \
   --ingress external --target-port 80 \
   --min-replicas 1 --max-replicas 1 \
@@ -107,8 +107,8 @@ az containerapp create \
   "${REG_ARGS[@]}" \
   -o none
 
-API_FQDN="$(az containerapp show -n mitigation-api -g "$RG" --query properties.configuration.ingress.fqdn -o tsv)"
-UI_FQDN="$(az containerapp show -n mitigation-ui -g "$RG" --query properties.configuration.ingress.fqdn -o tsv)"
+API_FQDN="$(az containerapp show -n defense-validation-api -g "$RG" --query properties.configuration.ingress.fqdn -o tsv)"
+UI_FQDN="$(az containerapp show -n defense-validation-ui -g "$RG" --query properties.configuration.ingress.fqdn -o tsv)"
 echo
 echo "API:  https://$API_FQDN   (docs: https://$API_FQDN/docs)"
 echo "UI:   https://$UI_FQDN"

@@ -8,3 +8,6 @@ api/data/
 
 # Editor swap files
 *.swp
+
+# JetBrains IDE workspace
+.idea/

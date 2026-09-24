@@ -1,4 +1,4 @@
-module github.com/janus/mitigation-check-api
+module github.com/janus/defense-validation-api
 
 go 1.26.5
 

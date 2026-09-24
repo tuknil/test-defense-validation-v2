@@ -1,8 +1,8 @@
 {
-  "contract_id": "mitigation-check@1.0",
+  "contract_id": "defense-validation@1.0",
   "candidate_artifact_id": "candidate:log4shell:egress-firewall:block-jndi",
   "test_basis_id": "test-basis:log4shell:jndi-callback:1389",
-  "check_profile_id": "mitigation-check-profile:firewall-egress:1",
+  "check_profile_id": "defense-validation-profile:firewall-egress:1",
   "execution_mode": "firewall",
   "candidate": {
     "kind": "firewall-rule",

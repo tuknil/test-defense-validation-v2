@@ -21,8 +21,8 @@ func TestMatchRequiresActualBlock(t *testing.T) {
 			Request:  TestRequest{Method: "POST", Path: "/x", Body: body},
 			Expected: TestExpected{Blocked: &b, StatusCode: 403},
 		})
-		req := SubmitMitigationCheckRequest{
-			ContractID: "mitigation-check@1.0", ExecutionMode: "inmemory",
+		req := SubmitDefenseValidationRequest{
+			ContractID: "defense-validation@1.0", ExecutionMode: "inmemory",
 			Candidate: cand, TestBasis: tb,
 		}
 		return executeScenario(context.Background(), req, "run", "res")

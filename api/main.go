@@ -1,6 +1,6 @@
-// Package main implements the mitigation-check private ingress API (LLD §6.1).
+// Package main implements the defense-validation private ingress API (LLD §6.1).
 //
-// Step 1 scope: accept a SubmitMitigationCheckRequest@1 (LLD §10.1), validate it
+// Step 1 scope: accept a SubmitDefenseValidationRequest@1 (LLD §10.1), validate it
 // against the input contract, and return an accepted run reference (LLD §9.1).
 // Downstream queueing, workers, and the verdict engine are out of scope for this step.
 package main
@@ -24,7 +24,15 @@ import (
 	"crypto/rand"
 )
 
-const contractID = "mitigation-check@1.0"
+const contractID = "defense-validation@1.0"
+
+// runsPath is the durable async collection; compatRunsPath is the synchronous
+// legacy collection. Both are declared here so the handlers strip exactly the
+// prefix they are mounted on.
+const (
+	runsPath       = "/v1/defense-validation-runs"
+	compatRunsPath = "/v1/compat/defense-validation-runs"
+)
 
 // upstreamContractID is the contract of the incoming defense-generation payload
 // that now carries the mitigation rule (primary_candidate.artifact_content).
@@ -36,11 +44,11 @@ var openapiSpec []byte
 // maxBodyBytes bounds request payloads at the API edge (LLD §3.4, §13.7).
 const maxBodyBytes = 64 * 1024
 
-// SubmitMitigationCheckRequest mirrors the request contract in LLD §10.1, plus
+// SubmitDefenseValidationRequest mirrors the request contract in LLD §10.1, plus
 // inline artifact bodies. The reference IDs remain authoritative; the nested
 // `substrate` / `candidate` / `test_basis` objects carry the actual artifact
 // content (container image, WAF rule, attack test) so a run is self-describing.
-type SubmitMitigationCheckRequest struct {
+type SubmitDefenseValidationRequest struct {
 	ContractID          string `json:"contract_id"`
 	RequestID           string `json:"request_id,omitempty"`
 	CandidateArtifactID string `json:"candidate_artifact_id"`
@@ -162,7 +170,7 @@ var dbx *DatabricksSink
 
 // upstreamInputMode selects the separate upstream executor: the mitigation rule is
 // read from a Databricks table referenced by the request's upstream_inputs, instead
-// of the inline candidate. On by default; set env MC_INPUT_UPSTREAM=0 to disable.
+// of the inline candidate. On by default; set env DV_INPUT_UPSTREAM=0 to disable.
 var upstreamInputMode bool
 
 // dbxReader reads upstream result_json rows from Databricks (upstream mode only).
@@ -191,8 +199,8 @@ func main() {
 	dbx = NewDatabricksSink()
 
 	// Separate upstream executor (rule read from Databricks) — toggled by env, and
-	// ON by default; set MC_INPUT_UPSTREAM to 0/false/no to use the legacy executor.
-	v := strings.ToLower(strings.TrimSpace(os.Getenv("MC_INPUT_UPSTREAM")))
+	// ON by default; set DV_INPUT_UPSTREAM to 0/false/no to use the legacy executor.
+	v := strings.ToLower(strings.TrimSpace(os.Getenv("DV_INPUT_UPSTREAM")))
 	if v == "" {
 		v = "1"
 	}
@@ -203,10 +211,10 @@ func main() {
 	}
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/v1/mitigation-check-runs", withCORS(handleRunsCollection))
-	mux.HandleFunc("/v1/mitigation-check-runs/", withCORS(handleRunItem))
-	mux.HandleFunc("/v1/compat/mitigation-check-runs", withCORS(handleCompatibilityRunsCollection))
-	mux.HandleFunc("/v1/compat/mitigation-check-runs/", withCORS(handleCompatibilityRunItem))
+	mux.HandleFunc(runsPath, withCORS(handleRunsCollection))
+	mux.HandleFunc(runsPath+"/", withCORS(handleRunItem))
+	mux.HandleFunc(compatRunsPath, withCORS(handleCompatibilityRunsCollection))
+	mux.HandleFunc(compatRunsPath+"/", withCORS(handleCompatibilityRunItem))
 	mux.HandleFunc("/healthz", withCORS(handleHealth))
 	mux.HandleFunc("/openapi.yaml", withCORS(handleOpenAPI))
 	mux.HandleFunc("/docs", withCORS(handleDocs))
@@ -234,7 +242,7 @@ func main() {
 		_ = srv.Shutdown(ctx)
 	}()
 
-	log.Printf("mitigation-check API listening on %s", srv.Addr)
+	log.Printf("defense-validation API listening on %s", srv.Addr)
 	err = srv.ListenAndServe()
 	stopWorkers()
 	store.Close() // close the connection pool after in-flight requests drain
@@ -251,7 +259,7 @@ func main() {
 // result_ref pointing at the Databricks row (keyed by run_id + result_id, the
 // same values written to that table so a consumer can query it).
 func enrichEnvelope(out *RunOutcome, correlationID string) {
-	out.Capability = "mitigation-check"
+	out.Capability = "defense-validation"
 	out.ContractID = contractID
 	out.CorrelationID = correlationID
 	if out.EvidenceRefs == nil {
@@ -275,14 +283,14 @@ func runScenarioCLI(path string) {
 	if err != nil {
 		log.Fatalf("read scenario: %v", err)
 	}
-	var req SubmitMitigationCheckRequest
+	var req SubmitDefenseValidationRequest
 	if err := json.Unmarshal(data, &req); err != nil {
 		log.Fatalf("parse scenario: %v", err)
 	}
 	req.ExecutionMode = execLocal // on the runner, use docker
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
-	out := executeScenario(ctx, req, "mc-run-"+newID(), resultIDPrefix+newID())
+	out := executeScenario(ctx, req, "dv-run-"+newID(), resultIDPrefix+newID())
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
 	_ = enc.Encode(out)
@@ -305,7 +313,7 @@ const swaggerHTML = `<!doctype html>
 <head>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
-  <title>mitigation-check API — Swagger</title>
+  <title>defense-validation API — Swagger</title>
   <link rel="stylesheet" href="https://unpkg.com/swagger-ui-dist@5/swagger-ui.css"/>
 </head>
 <body>
@@ -353,7 +361,7 @@ func handleCompatibilityRunItem(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	id := strings.TrimPrefix(r.URL.Path, "/v1/mitigation-check-runs/")
+	id := runIDFromPath(r.URL.Path, compatRunsPath)
 	rec, ok := store.Get(id)
 	if !ok {
 		writeError(w, http.StatusNotFound, APIError{
@@ -375,7 +383,7 @@ func handleSubmitRunSync(w http.ResponseWriter, r *http.Request) {
 	if fields := validate(req); len(fields) > 0 {
 		writeError(w, http.StatusBadRequest, APIError{
 			Category: "invalid-input",
-			Message:  "request does not satisfy mitigation-check@1.0 contract",
+			Message:  "request does not satisfy defense-validation@1.0 contract",
 			Fields:   fields,
 		})
 		return
@@ -384,8 +392,8 @@ func handleSubmitRunSync(w http.ResponseWriter, r *http.Request) {
 	// Execute the scenario synchronously: bring up the substrate container, apply
 	// the candidate WAF rule, run the supplied test, and resolve a terminal state
 	// (LLD §5, §6.4, §6.5). The request context always remains authoritative;
-	// MC_EXECUTION_TIMEOUT can optionally add an operator-configured deadline.
-	runID := "mc-run-" + newID()
+	// DV_EXECUTION_TIMEOUT can optionally add an operator-configured deadline.
+	runID := "dv-run-" + newID()
 	resultID := resultIDPrefix + newID()
 
 	ctx, cancel := executionContext(r.Context())
@@ -441,8 +449,8 @@ func handleSubmitRunSync(w http.ResponseWriter, r *http.Request) {
 // decodeRequest reads and strictly decodes the body, rejecting unknown fields to
 // honor the contract's additionalProperties:false (LLD §10.1). It also returns the
 // exact raw bytes so the run ledger can store the immutable request.
-func decodeRequest(r *http.Request) (SubmitMitigationCheckRequest, json.RawMessage, *APIError) {
-	var req SubmitMitigationCheckRequest
+func decodeRequest(r *http.Request) (SubmitDefenseValidationRequest, json.RawMessage, *APIError) {
+	var req SubmitDefenseValidationRequest
 
 	raw, err := io.ReadAll(http.MaxBytesReader(nil, r.Body, maxBodyBytes))
 	if err != nil {
@@ -475,9 +483,9 @@ func decodeRequest(r *http.Request) (SubmitMitigationCheckRequest, json.RawMessa
 	return req, json.RawMessage(raw), nil
 }
 
-// validate enforces the SubmitMitigationCheckRequest@1 field rules (LLD §10.1)
+// validate enforces the SubmitDefenseValidationRequest@1 field rules (LLD §10.1)
 // and returns the names of every offending field.
-func validate(req SubmitMitigationCheckRequest) []string {
+func validate(req SubmitDefenseValidationRequest) []string {
 	var bad []string
 	// In upstream-input mode the rule is read from Databricks via upstream_inputs, so
 	// the legacy reference ids are not required and the upstream contract is accepted.
@@ -569,6 +577,20 @@ func validate(req SubmitMitigationCheckRequest) []string {
 		}
 	}
 	return bad
+}
+
+// runIDFromPath returns the path remainder after the collection a handler is
+// mounted on, or "" when path is not under base. A handler must pass its own
+// base: the durable and compatibility collections share a suffix, so a bare
+// TrimPrefix of the wrong one is a silent no-op that leaves the whole path in
+// place and makes every ledger lookup miss. Returning "" on a non-match turns
+// that mistake into an immediate not-found instead.
+func runIDFromPath(path, base string) string {
+	rest, ok := strings.CutPrefix(path, base+"/")
+	if !ok {
+		return ""
+	}
+	return strings.Trim(rest, "/")
 }
 
 func withCORS(next http.HandlerFunc) http.HandlerFunc {

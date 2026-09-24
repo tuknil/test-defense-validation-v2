@@ -10,8 +10,8 @@ import (
 // the API view strips them, leaving the envelope + verdict.
 func TestAPIResultViewHidesEmbeddedFields(t *testing.T) {
 	canonical := []byte(`{
-		"capability":"mitigation-check","contract_id":"mitigation-check@1.0",
-		"run_id":"mc-run-1","result_id":"r","terminal_state":"blocked","status":"completed",
+		"capability":"defense-validation","contract_id":"defense-validation@1.0",
+		"run_id":"dv-run-1","result_id":"r","terminal_state":"blocked","status":"completed",
 		"match":true,"expected":{"blocked":true},"actual":{"blocked":true},"substrate":{"image":"x"},
 		"candidate":{"rule":"SecRule ..."},"test_basis":{"kind":"http-probe"},
 		"steps":["a","b"],"prose_summary":"...","limitations":["l"],

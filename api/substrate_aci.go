@@ -10,7 +10,7 @@ package main
 //
 // It authenticates with DefaultAzureCredential (a managed identity on ACA, or
 // env/az-cli locally) and needs, at minimum:
-//   AZURE_SUBSCRIPTION_ID, MC_ACI_RESOURCE_GROUP, MC_ACI_REGION
+//   AZURE_SUBSCRIPTION_ID, DV_ACI_RESOURCE_GROUP, DV_ACI_REGION
 // When those are unset the adapter returns a could-not-test reason rather than
 // failing, so the mode is selectable everywhere; real execution needs Azure.
 
@@ -35,10 +35,10 @@ const aciSubstratePort int32 = 8080
 
 // bringUpACISubstrate creates a per-run ACI container group for the substrate.
 // azureInsecureClient returns an HTTP client that skips TLS verification when
-// MC_AZURE_INSECURE_TLS is truthy — for a corporate TLS-interception proxy in
+// DV_AZURE_INSECURE_TLS is truthy — for a corporate TLS-interception proxy in
 // front of Azure endpoints. Off by default; INSECURE, use only when necessary.
 func azureInsecureClient() *http.Client {
-	switch strings.ToLower(os.Getenv("MC_AZURE_INSECURE_TLS")) {
+	switch strings.ToLower(os.Getenv("DV_AZURE_INSECURE_TLS")) {
 	case "1", "true", "yes", "on":
 		return &http.Client{Transport: &http.Transport{
 			TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec // opt-in bypass
@@ -49,8 +49,8 @@ func azureInsecureClient() *http.Client {
 
 func aciConfig() (subID, rg, region string, ok bool) {
 	subID = os.Getenv("AZURE_SUBSCRIPTION_ID")
-	rg = os.Getenv("MC_ACI_RESOURCE_GROUP")
-	region = os.Getenv("MC_ACI_REGION")
+	rg = os.Getenv("DV_ACI_RESOURCE_GROUP")
+	region = os.Getenv("DV_ACI_REGION")
 	ok = subID != "" && rg != "" && region != ""
 	return
 }
@@ -60,7 +60,7 @@ func aciConfig() (subID, rg, region string, ok bool) {
 func bringUpACISubstrate(ctx context.Context, out *RunOutcome, sub SubstrateSpec, runID string) (*substrate, string) {
 	subID, rg, region, ok := aciConfig()
 	if !ok {
-		return nil, "azure ACI not configured (set AZURE_SUBSCRIPTION_ID, MC_ACI_RESOURCE_GROUP, MC_ACI_REGION)"
+		return nil, "azure ACI not configured (set AZURE_SUBSCRIPTION_ID, DV_ACI_RESOURCE_GROUP, DV_ACI_REGION)"
 	}
 	credOpts := &azidentity.DefaultAzureCredentialOptions{}
 	if c := azureInsecureClient(); c != nil {
@@ -79,7 +79,7 @@ func bringUpACISubstrate(ctx context.Context, out *RunOutcome, sub SubstrateSpec
 func bringUpACISPSubstrate(ctx context.Context, out *RunOutcome, sub SubstrateSpec, runID string) (*substrate, string) {
 	subID, rg, region, ok := aciConfig()
 	if !ok {
-		return nil, "azure ACI not configured (set AZURE_SUBSCRIPTION_ID, MC_ACI_RESOURCE_GROUP, MC_ACI_REGION)"
+		return nil, "azure ACI not configured (set AZURE_SUBSCRIPTION_ID, DV_ACI_RESOURCE_GROUP, DV_ACI_REGION)"
 	}
 	tenant := os.Getenv("AZURE_TENANT_ID")
 	clientID := os.Getenv("AZURE_CLIENT_ID")
@@ -127,8 +127,8 @@ func bringUpACIWith(ctx context.Context, out *RunOutcome, sub SubstrateSpec, run
 					Ports: []*armcontainerinstance.ContainerPort{{Port: to.Ptr(aciSubstratePort)}},
 					Resources: &armcontainerinstance.ResourceRequirements{
 						Requests: &armcontainerinstance.ResourceRequests{
-							CPU:        to.Ptr(envFloat("MC_ACI_CPU", 1.0)),
-							MemoryInGB: to.Ptr(envFloat("MC_ACI_MEMORY_GB", 1.5)),
+							CPU:        to.Ptr(envFloat("DV_ACI_CPU", 1.0)),
+							MemoryInGB: to.Ptr(envFloat("DV_ACI_MEMORY_GB", 1.5)),
 						},
 					},
 				},
@@ -211,11 +211,11 @@ func aciDeleter(client *armcontainerinstance.ContainerGroupsClient, rg, name str
 }
 
 // aciRegistryCredential builds registry auth for a private image, from
-// MC_ACI_REGISTRY_* or the JFROG_* vars, if present.
+// DV_ACI_REGISTRY_* or the JFROG_* vars, if present.
 func aciRegistryCredential() *armcontainerinstance.ImageRegistryCredential {
-	server := firstNonEmpty(os.Getenv("MC_ACI_REGISTRY_SERVER"), os.Getenv("JFROG_REGISTRY"))
-	user := firstNonEmpty(os.Getenv("MC_ACI_REGISTRY_USERNAME"), os.Getenv("JFROG_USER"))
-	pass := firstNonEmpty(os.Getenv("MC_ACI_REGISTRY_PASSWORD"), os.Getenv("JFROG_TOKEN"))
+	server := firstNonEmpty(os.Getenv("DV_ACI_REGISTRY_SERVER"), os.Getenv("JFROG_REGISTRY"))
+	user := firstNonEmpty(os.Getenv("DV_ACI_REGISTRY_USERNAME"), os.Getenv("JFROG_USER"))
+	pass := firstNonEmpty(os.Getenv("DV_ACI_REGISTRY_PASSWORD"), os.Getenv("JFROG_TOKEN"))
 	if server == "" || user == "" || pass == "" {
 		return nil
 	}
@@ -240,7 +240,7 @@ func aciName(runID string) string {
 	}
 	out := strings.Trim(b.String(), "-")
 	if out == "" {
-		out = "mc-run"
+		out = "dv-run"
 	}
 	if len(out) > 63 {
 		out = strings.Trim(out[:63], "-")

@@ -9,7 +9,7 @@ package main
 // Config comes from docker compose env:
 //   GITHUB_REPO      owner/repo that holds the workflow
 //   GITHUB_TOKEN     PAT with actions:write on that repo
-//   GITHUB_WORKFLOW  workflow file name (default mitigation-check.yml)
+//   GITHUB_WORKFLOW  workflow file name (default defense-validation.yml)
 //   GITHUB_REF       branch to run on (default main)
 //   GITHUB_USERNAME  informational only
 // When repo/token are unset an aci/github run returns could-not-test.
@@ -30,13 +30,13 @@ import (
 )
 
 const githubAPI = "https://api.github.com"
-const githubResultArtifact = "mitigation-check-result"
+const githubResultArtifact = "defense-validation-result"
 
 // runViaGitHub dispatches the workflow, waits for the run, and returns its result.
-func runViaGitHub(ctx context.Context, req SubmitMitigationCheckRequest, out RunOutcome) RunOutcome {
+func runViaGitHub(ctx context.Context, req SubmitDefenseValidationRequest, out RunOutcome) RunOutcome {
 	repo := os.Getenv("GITHUB_REPO")
 	token := os.Getenv("GITHUB_TOKEN")
-	workflow := firstNonEmpty(os.Getenv("GITHUB_WORKFLOW"), "mitigation-check.yml")
+	workflow := firstNonEmpty(os.Getenv("GITHUB_WORKFLOW"), "defense-validation.yml")
 	ref := firstNonEmpty(os.Getenv("GITHUB_REF"), "main")
 	if repo == "" || token == "" {
 		return couldNotTest(out, "github actions not configured (set GITHUB_REPO, GITHUB_TOKEN)")

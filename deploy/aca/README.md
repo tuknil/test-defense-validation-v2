@@ -21,10 +21,10 @@ GHCR (or ACR):
 
 ```bash
 # from repo root — build for linux/amd64 (ACA runs amd64)
-docker build --platform linux/amd64 -t ghcr.io/tuknil/mitigation-check-api:latest ./api
-docker build --platform linux/amd64 -t ghcr.io/tuknil/mitigation-check-ui:latest  ./ui
-docker push ghcr.io/tuknil/mitigation-check-api:latest
-docker push ghcr.io/tuknil/mitigation-check-ui:latest
+docker build --platform linux/amd64 -t ghcr.io/tuknil/defense-validation-api:latest ./api
+docker build --platform linux/amd64 -t ghcr.io/tuknil/defense-validation-ui:latest  ./ui
+docker push ghcr.io/tuknil/defense-validation-api:latest
+docker push ghcr.io/tuknil/defense-validation-ui:latest
 ```
 
 If the packages are **private**, set `REGISTRY_SERVER`/`REGISTRY_USERNAME`/
@@ -43,7 +43,7 @@ environment, apps, and (for `aci` mode) a role assignment.
 
 - **API** container app — external ingress on `8137`, a **system-assigned managed
   identity**, `DATABASE_URL` and `CAPABILITY_CALLBACK_TOKEN` as secret references,
-  and the `MC_ACI_*` / `AZURE_SUBSCRIPTION_ID` env for ACI substrates.
+  and the `DV_ACI_*` / `AZURE_SUBSCRIPTION_ID` env for ACI substrates.
 - **Managed-identity RBAC:** the API identity gets **Contributor on the ACI
   resource group** so `aci` mode can create/delete container groups.
 - Optional secrets for **`github`/`github-ghcr`** (`GITHUB_REPO`, `GITHUB_TOKEN`)
@@ -74,15 +74,15 @@ After deployment, capture the ACA revision name and image digest, confirm
 redacted `callback_metadata_accepted` log plus one `202 Accepted` callback trace.
 Record the event ID, capability run ID, request ID, correlation ID, Temporal
 child workflow ID, and a polling-only completion trace. The full checklist is in
-[`mitigation-check-lld.md`](../../mitigation-check-lld.md#10-acceptance-evidence).
+[`defense-validation-lld.md`](../../defense-validation-lld.md#10-acceptance-evidence).
 
 ## Notes / caveats
 
 - This is a **template**, not run against a live subscription here — adjust names,
   SKUs, and networking to your environment.
-- Drop the `docker.sock` mount and `MC_SUBSTRATE_NETWORK` — those are `local`-mode
+- Drop the `docker.sock` mount and `DV_SUBSTRATE_NETWORK` — those are `local`-mode
   only and don't apply on ACA.
 - For `github-ghcr`, the API's `GITHUB_TOKEN` needs `write:packages` (push) and
   `repo` (to set the `GHCR_PAT` runner secret); the relayed package stays private.
-- For a private **source** registry in `github-ghcr`, set `MC_ACI_REGISTRY_*` (or
+- For a private **source** registry in `github-ghcr`, set `DV_ACI_REGISTRY_*` (or
   `JFROG_*`) so the relay can authenticate the pull.

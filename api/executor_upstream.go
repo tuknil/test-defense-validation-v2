@@ -1,7 +1,7 @@
 package main
 
 // executor_upstream.go is a SEPARATE executor selected by the env condition
-// variable MC_INPUT_UPSTREAM (truthy). It serves the same POST endpoint but takes
+// variable DV_INPUT_UPSTREAM (truthy). It serves the same POST endpoint but takes
 // the new input contract: instead of inline artifacts, the request carries
 // upstream_inputs whose result_refs point at Databricks rows. Entries are selected
 // by capability:
@@ -64,7 +64,7 @@ type upstreamInput struct {
 // executeScenarioUpstream resolves the rule (and, when needed, the test) from
 // Databricks and delegates the run to the shared executor. Any resolution failure
 // is a could-not-test (never a fabricated verdict).
-func executeScenarioUpstream(ctx context.Context, req SubmitMitigationCheckRequest, runID, resultID string) RunOutcome {
+func executeScenarioUpstream(ctx context.Context, req SubmitDefenseValidationRequest, runID, resultID string) RunOutcome {
 	base := RunOutcome{RunID: runID, ResultID: resultID}
 
 	entries, err := parseUpstreamInputs(req.UpstreamInputs)
@@ -138,7 +138,7 @@ func executeScenarioUpstream(ctx context.Context, req SubmitMitigationCheckReque
 	return out
 }
 
-func lifecycleIdentity(req SubmitMitigationCheckRequest, runID, resultID string) DurableRun {
+func lifecycleIdentity(req SubmitDefenseValidationRequest, runID, resultID string) DurableRun {
 	return DurableRun{RunStatus: RunStatus{RequestID: req.RequestID, CorrelationID: req.CorrelationID, RunID: runID, ResultID: &resultID, Status: statusRunning}}
 }
 

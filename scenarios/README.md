@@ -3,7 +3,7 @@
 Four ready-to-run request payloads, one per confusion-matrix quadrant. Open a
 file, copy its contents, paste into the **Request payload (JSON)** box on the
 landing page, and click **Submit run**. Each is a complete, valid
-`SubmitMitigationCheckRequest@1` body.
+`SubmitDefenseValidationRequest@1` body.
 
 All four use the same substrate — the real `ghcr.io/christophetd/log4shell-vulnerable-app`
 container (CVE-2021-44228 / Log4Shell). What varies is the candidate **WAF rule**
@@ -34,7 +34,7 @@ So the two failure quadrants are exactly the runs where `match` is `false`:
 ## Run from the CLI instead
 
 ```bash
-curl -s -X POST localhost:8137/v1/mitigation-check-runs \
+curl -s -X POST localhost:8137/v1/defense-validation-runs \
   -H 'Content-Type: application/json' \
   --data-binary @scenarios/03-false-positive.json | python3 -m json.tool
 ```

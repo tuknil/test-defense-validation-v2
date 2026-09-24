@@ -150,7 +150,7 @@ func (dispatcher *CallbackDispatcher) deliver(ctx context.Context, delivery Call
 	payload := CallbackPayload{
 		WorkflowID: delivery.Run.CallbackWorkflowID,
 		Wakeup: CallbackWakeup{
-			EventID: delivery.Run.CallbackEventID, Capability: "mitigation-check",
+			EventID: delivery.Run.CallbackEventID, Capability: "defense-validation",
 			RequestID: delivery.Run.RequestID, CorrelationID: delivery.Run.CorrelationID, RunID: delivery.Run.RunID,
 		},
 	}

@@ -76,11 +76,11 @@ var newLocatorInputResolver = func() (locatorInputResolver, error) {
 	return newDatabricksLocatorResolverFromEnv()
 }
 
-func locatorMode(req SubmitMitigationCheckRequest) bool {
+func locatorMode(req SubmitDefenseValidationRequest) bool {
 	return req.DefenseResult != nil || req.CheckResult != nil || strings.TrimSpace(req.RoutePolicy) != ""
 }
 
-func validateLocatorRequest(req SubmitMitigationCheckRequest) []string {
+func validateLocatorRequest(req SubmitDefenseValidationRequest) []string {
 	var bad []string
 	if req.RoutePolicy != locatorRoutePolicy {
 		bad = append(bad, "route_policy")
@@ -175,7 +175,7 @@ func validSHA256(value string) bool {
 	return err == nil && value == strings.ToLower(value)
 }
 
-func executeScenarioByLocator(ctx context.Context, req SubmitMitigationCheckRequest, runID, resultID string) RunOutcome {
+func executeScenarioByLocator(ctx context.Context, req SubmitDefenseValidationRequest, runID, resultID string) RunOutcome {
 	base := RunOutcome{RunID: runID, ResultID: resultID}
 	resolver, err := newLocatorInputResolver()
 	if err != nil {
@@ -189,7 +189,7 @@ func executeScenarioByLocator(ctx context.Context, req SubmitMitigationCheckRequ
 	req.ExecutionMode = execInMemory
 	req.CandidateArtifactID = resolved.Candidate.RuleID
 	req.TestBasisID = resolved.Provenance.SelectedTestBasisID
-	req.CheckProfileID = "mitigation-check-profile:waf-http:1"
+	req.CheckProfileID = "defense-validation-profile:waf-http:1"
 	req.Candidate, _ = json.Marshal(resolved.Candidate)
 	req.TestBasis, _ = json.Marshal(resolved.TestBasis)
 	out := executeScenario(ctx, req, runID, resultID)

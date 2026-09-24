@@ -25,7 +25,7 @@ func TestCallbackHeaderValidation(t *testing.T) {
 	if _, apiError := callbackMetadataFromHeaders(header, "orchestration.example"); apiError == nil || apiError.Code != "invalid_callback_headers" {
 		t.Fatalf("incomplete callback headers accepted: %+v", apiError)
 	}
-	header.Set(callbackWorkflowIDHeader, "janus-mitigation-check-abc123")
+	header.Set(callbackWorkflowIDHeader, "janus-defense-validation-abc123")
 	header.Set(callbackSignalHeader, callbackSignal)
 	metadata, apiError = callbackMetadataFromHeaders(header, "orchestration.example")
 	if apiError != nil || metadata.URL != header.Get(callbackURLHeader) || metadata.WorkflowID != header.Get(callbackWorkflowIDHeader) || metadata.Signal != callbackSignal {
@@ -85,12 +85,12 @@ func (store *callbackStoreFake) CallbackConfigurationFailed(_ context.Context, _
 }
 
 func callbackDeliveryFixture(callbackURL string) CallbackDelivery {
-	runID := "mitigation-run-123"
+	runID := "dv-run-123"
 	return CallbackDelivery{
 		Run: DurableRun{
-			RunStatus:   RunStatus{RequestID: "mitigation-request-123", CorrelationID: "correlation-123", RunID: runID, Status: statusCompleted},
-			CallbackURL: callbackURL, CallbackWorkflowID: "janus-mitigation-check-abc123",
-			CallbackSignal: callbackSignal, CallbackEventID: "mitigation-check:" + runID + ":terminal:v1",
+			RunStatus:   RunStatus{RequestID: "dv-request-123", CorrelationID: "correlation-123", RunID: runID, Status: statusCompleted},
+			CallbackURL: callbackURL, CallbackWorkflowID: "janus-defense-validation-abc123",
+			CallbackSignal: callbackSignal, CallbackEventID: "defense-validation:" + runID + ":terminal:v1",
 		},
 		LeaseToken: "lease-1",
 	}
@@ -116,7 +116,7 @@ func TestCallbackPayloadAndAcceptedDelivery(t *testing.T) {
 			t.Error(err)
 		}
 		w.WriteHeader(http.StatusAccepted)
-		_, _ = w.Write([]byte(`{"event_id":"mitigation-check:mitigation-run-123:terminal:v1","status":"accepted"}`))
+		_, _ = w.Write([]byte(`{"event_id":"defense-validation:dv-run-123:terminal:v1","status":"accepted"}`))
 	}))
 	defer server.Close()
 
@@ -134,9 +134,9 @@ func TestCallbackPayloadAndAcceptedDelivery(t *testing.T) {
 	if len(topLevelFields) != 2 || topLevelFields["workflow_id"] == nil || topLevelFields["wakeup"] == nil {
 		t.Fatalf("callback contains unknown or missing top-level fields: %v", topLevelFields)
 	}
-	if received.WorkflowID != "janus-mitigation-check-abc123" || received.Wakeup.EventID != "mitigation-check:mitigation-run-123:terminal:v1" ||
-		received.Wakeup.Capability != "mitigation-check" || received.Wakeup.RequestID != "mitigation-request-123" ||
-		received.Wakeup.CorrelationID != "correlation-123" || received.Wakeup.RunID != "mitigation-run-123" {
+	if received.WorkflowID != "janus-defense-validation-abc123" || received.Wakeup.EventID != "defense-validation:dv-run-123:terminal:v1" ||
+		received.Wakeup.Capability != "defense-validation" || received.Wakeup.RequestID != "dv-request-123" ||
+		received.Wakeup.CorrelationID != "correlation-123" || received.Wakeup.RunID != "dv-run-123" {
 		t.Fatalf("callback payload=%+v", received)
 	}
 }
@@ -236,13 +236,13 @@ func TestSubmitPersistsCallbackHeadersAndSupportsPollingOnly(t *testing.T) {
 	for _, withCallback := range []bool{true, false} {
 		requestID := "test-callback-submit-" + newID()
 		requestBody, _ := json.Marshal(validLifecycleRequest(requestID))
-		request := httptest.NewRequest(http.MethodPost, "/v1/mitigation-check-runs", bytes.NewReader(requestBody))
+		request := httptest.NewRequest(http.MethodPost, "/v1/defense-validation-runs", bytes.NewReader(requestBody))
 		request.Header.Set("Content-Type", "application/json")
 		request.Header.Set("Idempotency-Key", requestID)
 		request.Header.Set("X-Correlation-ID", "correlation-1")
 		if withCallback {
 			request.Header.Set(callbackURLHeader, "https://orchestration.example/v1/capability-callbacks")
-			request.Header.Set(callbackWorkflowIDHeader, "janus-mitigation-check-abc123")
+			request.Header.Set(callbackWorkflowIDHeader, "janus-defense-validation-abc123")
 			request.Header.Set(callbackSignalHeader, callbackSignal)
 		}
 		response := httptest.NewRecorder()
@@ -255,7 +255,7 @@ func TestSubmitPersistsCallbackHeadersAndSupportsPollingOnly(t *testing.T) {
 			t.Fatal(err)
 		}
 		t.Cleanup(func() {
-			_, _ = databaseStore.db.Exec(`DELETE FROM mitigation_check_run WHERE request_id=$1`, requestID)
+			_, _ = databaseStore.db.Exec(`DELETE FROM defense_validation_run WHERE request_id=$1`, requestID)
 		})
 		persisted, err := databaseStore.GetDurable(context.Background(), submission.RunID)
 		if err != nil {
@@ -263,7 +263,7 @@ func TestSubmitPersistsCallbackHeadersAndSupportsPollingOnly(t *testing.T) {
 		}
 		if withCallback {
 			if persisted.CallbackURL != "https://orchestration.example/v1/capability-callbacks" ||
-				persisted.CallbackWorkflowID != "janus-mitigation-check-abc123" || persisted.CallbackSignal != callbackSignal {
+				persisted.CallbackWorkflowID != "janus-defense-validation-abc123" || persisted.CallbackSignal != callbackSignal {
 				t.Fatalf("callback metadata not persisted: %+v", persisted)
 			}
 		} else if persisted.CallbackURL != "" || persisted.CallbackWorkflowID != "" || persisted.CallbackSignal != "" {
@@ -277,11 +277,11 @@ func TestTerminalTransitionCreatesOneCallbackAfterPollingIsAvailable(t *testing.
 	ctx := context.Background()
 	run := durableFixture(t, "test-callback-terminal-"+newID())
 	run.CallbackURL = "https://orchestration.example/v1/capability-callbacks"
-	run.CallbackWorkflowID = "janus-mitigation-check-abc123"
+	run.CallbackWorkflowID = "janus-defense-validation-abc123"
 	run.CallbackSignal = callbackSignal
-	run.CallbackEventID = "mitigation-check:" + run.RunID + ":terminal:v1"
+	run.CallbackEventID = "defense-validation:" + run.RunID + ":terminal:v1"
 	t.Cleanup(func() {
-		_, _ = databaseStore.db.Exec(`DELETE FROM mitigation_check_run WHERE request_id=$1`, run.RequestID)
+		_, _ = databaseStore.db.Exec(`DELETE FROM defense_validation_run WHERE request_id=$1`, run.RequestID)
 	})
 	if _, created, err := databaseStore.CreateOrGet(ctx, run); err != nil || !created {
 		t.Fatalf("create run: created=%t err=%v", created, err)

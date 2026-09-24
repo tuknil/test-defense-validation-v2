@@ -1,8 +1,8 @@
 {
-  "contract_id": "mitigation-check@1.0",
+  "contract_id": "defense-validation@1.0",
   "candidate_artifact_id": "candidate:log4shell:waf-rule:overbroad",
   "test_basis_id": "test-basis:benign:jndi-documentation",
-  "check_profile_id": "mitigation-check-profile:waf-http:1",
+  "check_profile_id": "defense-validation-profile:waf-http:1",
   "substrate_selector": "substrate:log4j-vulnerable-webserver:container",
   "substrate": {
     "kind": "container-image",

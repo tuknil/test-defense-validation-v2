@@ -1,6 +1,6 @@
 package main
 
-// store.go is the run ledger (LLD §11.1: mitigation_check_run / _result), backed
+// store.go is the run ledger (LLD §11.1: defense_validation_run / _result), backed
 // by a PostgreSQL database (run as its own container via docker compose). Data
 // durability is a property of the db container's volume, not this process.
 //
@@ -71,8 +71,15 @@ func NewRunStore() (*RunStore, error) {
 	if strings.EqualFold(strings.TrimSpace(os.Getenv("DATABASE_MIGRATION_MODE")), "external") {
 		log.Printf("ledger: DATABASE_MIGRATION_MODE=external — skipping in-app schema migration")
 	} else {
+		// The capability was renamed from mitigation-check to defense-validation;
+		// carry an existing ledger over before the create below would shadow it
+		// with an empty table.
+		if err := renameLegacyLedger(db); err != nil {
+			_ = db.Close()
+			return nil, fmt.Errorf("rename legacy ledger: %w", err)
+		}
 		if _, err := db.Exec(`
-			CREATE TABLE IF NOT EXISTS mitigation_check_run (
+			CREATE TABLE IF NOT EXISTS defense_validation_run (
 				run_id         TEXT        PRIMARY KEY,
 				result_id      TEXT        NOT NULL,
 				terminal_state TEXT        NOT NULL,
@@ -95,9 +102,44 @@ func NewRunStore() (*RunStore, error) {
 	return s, nil
 }
 
+// renameLegacyLedger moves a pre-rename mitigation_check_run table, and its
+// indexes, onto the defense_validation_run names. It is a no-op once the new
+// names exist, so it is safe to run on every start. A database that already
+// holds both tables is left alone: the old one is then stale, and picking a
+// winner is an operator decision, not this process's.
+func renameLegacyLedger(db *sql.DB) error {
+	_, err := db.Exec(`
+		DO $$
+		BEGIN
+			IF to_regclass('mitigation_check_run') IS NOT NULL
+			   AND to_regclass('defense_validation_run') IS NULL THEN
+				ALTER TABLE mitigation_check_run RENAME TO defense_validation_run;
+
+				IF to_regclass('mitigation_check_run_request_id_uq') IS NOT NULL
+				   AND to_regclass('defense_validation_run_request_id_uq') IS NULL THEN
+					ALTER INDEX mitigation_check_run_request_id_uq
+						RENAME TO defense_validation_run_request_id_uq;
+				END IF;
+				IF to_regclass('mitigation_check_run_worker_idx') IS NOT NULL
+				   AND to_regclass('defense_validation_run_worker_idx') IS NULL THEN
+					ALTER INDEX mitigation_check_run_worker_idx
+						RENAME TO defense_validation_run_worker_idx;
+				END IF;
+				IF to_regclass('mitigation_check_run_callback_idx') IS NOT NULL
+				   AND to_regclass('defense_validation_run_callback_idx') IS NULL THEN
+					ALTER INDEX mitigation_check_run_callback_idx
+						RENAME TO defense_validation_run_callback_idx;
+				END IF;
+
+				RAISE NOTICE 'ledger: renamed mitigation_check_run to defense_validation_run';
+			END IF;
+		END $$`)
+	return err
+}
+
 func (s *RunStore) count() int {
 	var n int
-	_ = s.db.QueryRow(`SELECT count(*) FROM mitigation_check_run`).Scan(&n)
+	_ = s.db.QueryRow(`SELECT count(*) FROM defense_validation_run`).Scan(&n)
 	return n
 }
 
@@ -117,7 +159,7 @@ func (s *RunStore) Add(r *RunRecord) error {
 		return err
 	}
 	_, err = s.db.Exec(`
-		INSERT INTO mitigation_check_run
+		INSERT INTO defense_validation_run
 			(run_id, result_id, terminal_state, match, created_at, request, response)
 		VALUES ($1, $2, $3, $4, $5, $6, $7)`,
 		r.RunID, r.ResultID, r.TerminalState, r.Match, r.CreatedAt,
@@ -133,7 +175,7 @@ func (s *RunStore) Get(id string) (*RunRecord, bool) {
 	)
 	err := s.db.QueryRow(`
 		SELECT run_id, result_id, terminal_state, match, created_at, request, response
-		FROM mitigation_check_run WHERE run_id = $1`, id).
+		FROM defense_validation_run WHERE run_id = $1`, id).
 		Scan(&rec.RunID, &rec.ResultID, &rec.TerminalState, &rec.Match,
 			&rec.CreatedAt, &request, &response)
 	if err != nil {
@@ -152,7 +194,7 @@ func (s *RunStore) List() []RunSummary {
 	rows, err := s.db.Query(`
 		SELECT run_id, result_id, terminal_state, match, created_at,
 		       COALESCE(response->>'prose_summary', '')
-		FROM mitigation_check_run
+		FROM defense_validation_run
 		ORDER BY created_at DESC`)
 	if err != nil {
 		log.Printf("ledger: list failed: %v", err)

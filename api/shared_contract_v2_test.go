@@ -496,7 +496,7 @@ func regexpMust(t *testing.T, pattern string) *regexp.Regexp {
 func TestV2RequestIsCompactAndLegacyReplayRemainsValid(t *testing.T) {
 	_, defense, check, _ := locatorFixture(t, false)
 	check.ContractID = "check-generation@2.1"
-	request := SubmitMitigationCheckRequest{ContractID: contractID, RequestID: "request", CorrelationID: defense.CorrelationID, RoutePolicy: sharedV2RoutePolicy, ProfileID: sharedV2ProfileID, DefenseResult: &defense, CheckResult: &check, ExecutionMode: execInMemory}
+	request := SubmitDefenseValidationRequest{ContractID: contractID, RequestID: "request", CorrelationID: defense.CorrelationID, RoutePolicy: sharedV2RoutePolicy, ProfileID: sharedV2ProfileID, DefenseResult: &defense, CheckResult: &check, ExecutionMode: execInMemory}
 	if fields := validate(request); len(fields) != 0 {
 		t.Fatalf("valid v2 request: %v", fields)
 	}

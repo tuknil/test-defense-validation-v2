@@ -283,11 +283,11 @@ var newSharedV2InputResolver = func() (sharedV2InputResolver, error) {
 
 type databricksSharedV2Resolver struct{ *databricksLocatorResolver }
 
-func v2LocatorMode(req SubmitMitigationCheckRequest) bool {
+func v2LocatorMode(req SubmitDefenseValidationRequest) bool {
 	return req.RoutePolicy == sharedV2RoutePolicy || strings.TrimSpace(req.ProfileID) != ""
 }
 
-func validateV2LocatorRequest(req SubmitMitigationCheckRequest) []string {
+func validateV2LocatorRequest(req SubmitDefenseValidationRequest) []string {
 	bad := []string{}
 	if req.RoutePolicy != sharedV2RoutePolicy {
 		bad = append(bad, "route_policy")
@@ -1018,7 +1018,7 @@ func uniqueStrings(values []string) []string {
 	return out
 }
 
-func executeSharedContractV2(ctx context.Context, req SubmitMitigationCheckRequest, runID, resultID string) RunOutcome {
+func executeSharedContractV2(ctx context.Context, req SubmitDefenseValidationRequest, runID, resultID string) RunOutcome {
 	out := RunOutcome{RunID: runID, ResultID: resultID, ProfileID: req.ProfileID, Substrate: SubInfo{Runner: execInMemory, Image: "(shared-contract bounded in-memory WAF)"}}
 	resolver, err := newSharedV2InputResolver()
 	if err != nil {

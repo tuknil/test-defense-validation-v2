@@ -29,7 +29,7 @@ sonar:
   additional-properties: >
     -Dsonar.log_level='INFO'
   domain: com.att.janus
-  name: JANUS-mitigation-check
+  name: JANUS-defense-validation
 
 #+--------------------+
 #|    SAST            |-------------------------------------------------------------------------------------------

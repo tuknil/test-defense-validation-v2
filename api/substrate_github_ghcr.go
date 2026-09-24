@@ -38,10 +38,10 @@ import (
 
 const ghcrSecretName = "GHCR_PAT"
 
-func runViaGitHubGHCR(ctx context.Context, req SubmitMitigationCheckRequest, out RunOutcome) RunOutcome {
+func runViaGitHubGHCR(ctx context.Context, req SubmitDefenseValidationRequest, out RunOutcome) RunOutcome {
 	repo := os.Getenv("GITHUB_REPO")
 	token := os.Getenv("GITHUB_TOKEN")
-	workflow := firstNonEmpty(os.Getenv("MC_GHCR_WORKFLOW"), "mitigation-check-ghcr.yml")
+	workflow := firstNonEmpty(os.Getenv("DV_GHCR_WORKFLOW"), "defense-validation-ghcr.yml")
 	ref := firstNonEmpty(os.Getenv("GITHUB_REF"), "main")
 	if repo == "" || token == "" {
 		return couldNotTest(out, "github actions not configured (set GITHUB_REPO, GITHUB_TOKEN)")
@@ -156,7 +156,7 @@ func (c *ghClient) ensureRepoSecret(ctx context.Context, repo, name, value strin
 // registry-to-registry (daemonless, via go-containerregistry) — no local Docker,
 // so it runs on Azure Container Apps. Needs egress to both registries and a GHCR
 // token with write:packages. A private source registry is authenticated from
-// MC_ACI_REGISTRY_* / JFROG_* env when set.
+// DV_ACI_REGISTRY_* / JFROG_* env when set.
 func relayImageToGHCR(ctx context.Context, sourceImage, owner, ghcrUser, ghcrToken string) (string, []string, error) {
 	var steps []string
 	if strings.TrimSpace(sourceImage) == "" {
@@ -166,17 +166,17 @@ func relayImageToGHCR(ctx context.Context, sourceImage, owner, ghcrUser, ghcrTok
 	kc := relayKeychain{
 		ghcrUser:  ghcrUser,
 		ghcrToken: ghcrToken,
-		srcHost:   firstNonEmpty(os.Getenv("MC_ACI_REGISTRY_SERVER"), os.Getenv("JFROG_REGISTRY")),
-		srcUser:   firstNonEmpty(os.Getenv("MC_ACI_REGISTRY_USERNAME"), os.Getenv("JFROG_USER")),
-		srcToken:  firstNonEmpty(os.Getenv("MC_ACI_REGISTRY_PASSWORD"), os.Getenv("JFROG_TOKEN")),
+		srcHost:   firstNonEmpty(os.Getenv("DV_ACI_REGISTRY_SERVER"), os.Getenv("JFROG_REGISTRY")),
+		srcUser:   firstNonEmpty(os.Getenv("DV_ACI_REGISTRY_USERNAME"), os.Getenv("JFROG_USER")),
+		srcToken:  firstNonEmpty(os.Getenv("DV_ACI_REGISTRY_PASSWORD"), os.Getenv("JFROG_TOKEN")),
 	}
 	opts := []crane.Option{crane.WithAuthFromKeychain(kc), crane.WithContext(ctx)}
-	switch strings.ToLower(os.Getenv("MC_RELAY_INSECURE_TLS")) {
+	switch strings.ToLower(os.Getenv("DV_RELAY_INSECURE_TLS")) {
 	case "1", "true", "yes", "on":
 		tr := http.DefaultTransport.(*http.Transport).Clone()
 		tr.TLSClientConfig = &tls.Config{InsecureSkipVerify: true} //nolint:gosec // opt-in bypass
 		opts = append(opts, crane.WithTransport(tr))
-		steps = append(steps, "relay: TLS verification disabled (MC_RELAY_INSECURE_TLS)")
+		steps = append(steps, "relay: TLS verification disabled (DV_RELAY_INSECURE_TLS)")
 	}
 	if err := crane.Copy(sourceImage, target, opts...); err != nil {
 		return target, steps, fmt.Errorf("copy %s -> %s: %w", sourceImage, target, err)

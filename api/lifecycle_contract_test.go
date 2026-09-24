@@ -83,7 +83,7 @@ func TestUpstreamEvidenceReferencesArePreservedAndDeduplicated(t *testing.T) {
 func TestAsyncSubmitRequiresExactJSONMediaTypeAndRootErrors(t *testing.T) {
 	body, _ := json.Marshal(validLifecycleRequest("request-media"))
 	for _, mediaType := range []string{"", "text/json", "application/json-patch+json", "application/jsonx"} {
-		req := httptest.NewRequest(http.MethodPost, "/v1/mitigation-check-runs", bytes.NewReader(body))
+		req := httptest.NewRequest(http.MethodPost, "/v1/defense-validation-runs", bytes.NewReader(body))
 		req.Header.Set("Content-Type", mediaType)
 		response := httptest.NewRecorder()
 		handleAsyncSubmit(response, req)
@@ -101,7 +101,7 @@ func TestAsyncSubmitRejectsBodyCallbackBeforePersistence(t *testing.T) {
 	request := validLifecycleRequest("request-callback")
 	request.Callback = &CallbackSpec{URL: "https://callback.invalid/events", EventContractID: "capability-run-event@1.0"}
 	body, _ := json.Marshal(request)
-	req := httptest.NewRequest(http.MethodPost, "/v1/mitigation-check-runs", bytes.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/v1/defense-validation-runs", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json; charset=utf-8")
 	req.Header.Set("Idempotency-Key", request.RequestID)
 	req.Header.Set("X-Correlation-ID", request.CorrelationID)
@@ -134,7 +134,7 @@ func TestLeaseFencingAndCanceledOrphanRecovery(t *testing.T) {
 	s := integrationStore(t)
 	ctx := context.Background()
 	run := durableFixture(t, "test-fencing-"+newID())
-	t.Cleanup(func() { _, _ = s.db.Exec(`DELETE FROM mitigation_check_run WHERE request_id=$1`, run.RequestID) })
+	t.Cleanup(func() { _, _ = s.db.Exec(`DELETE FROM defense_validation_run WHERE request_id=$1`, run.RequestID) })
 	if _, _, err := s.CreateOrGet(ctx, run); err != nil {
 		t.Fatal(err)
 	}
@@ -142,7 +142,7 @@ func TestLeaseFencingAndCanceledOrphanRecovery(t *testing.T) {
 	if err != nil || !ok || first.LeaseToken == "" {
 		t.Fatalf("first lease: ok=%t run=%+v err=%v", ok, first, err)
 	}
-	if _, err := s.db.Exec(`UPDATE mitigation_check_run SET lease_expires_at=now()-interval '1 second' WHERE run_id=$1`, run.RunID); err != nil {
+	if _, err := s.db.Exec(`UPDATE defense_validation_run SET lease_expires_at=now()-interval '1 second' WHERE run_id=$1`, run.RunID); err != nil {
 		t.Fatal(err)
 	}
 	second, ok, err := s.LeaseNext(ctx, "worker-new", time.Minute, 3)
@@ -163,7 +163,7 @@ func TestLeaseFencingAndCanceledOrphanRecovery(t *testing.T) {
 	if _, err := s.Cancel(ctx, run.RunID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.db.Exec(`UPDATE mitigation_check_run SET lease_expires_at=now()-interval '1 second' WHERE run_id=$1`, run.RunID); err != nil {
+	if _, err := s.db.Exec(`UPDATE defense_validation_run SET lease_expires_at=now()-interval '1 second' WHERE run_id=$1`, run.RunID); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.RecoverCanceled(ctx); err != nil {
@@ -271,7 +271,7 @@ func TestCancellationAfterPublicationCutoffCannotCancel(t *testing.T) {
 	s := integrationStore(t)
 	ctx := context.Background()
 	run := durableFixture(t, "test-publication-cutoff-"+newID())
-	t.Cleanup(func() { _, _ = s.db.Exec(`DELETE FROM mitigation_check_run WHERE request_id=$1`, run.RequestID) })
+	t.Cleanup(func() { _, _ = s.db.Exec(`DELETE FROM defense_validation_run WHERE request_id=$1`, run.RequestID) })
 	if _, _, err := s.CreateOrGet(ctx, run); err != nil {
 		t.Fatal(err)
 	}
@@ -296,7 +296,7 @@ func TestCancellationAfterPublicationCutoffCannotCancel(t *testing.T) {
 	if canceled, err := s.MarkCanceled(ctx, run.RunID, "worker-1", leased.LeaseToken); err != nil || canceled {
 		t.Fatalf("post-cutoff cancellation wrote=%t err=%v", canceled, err)
 	}
-	if _, err := s.db.Exec(`UPDATE mitigation_check_run SET lease_expires_at=now()-interval '1 second' WHERE run_id=$1`, run.RunID); err != nil {
+	if _, err := s.db.Exec(`UPDATE defense_validation_run SET lease_expires_at=now()-interval '1 second' WHERE run_id=$1`, run.RunID); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.RecoverCanceled(ctx); err != nil {
@@ -312,7 +312,7 @@ func TestSuccessfulDurablePublicationWinsConcurrentCancellation(t *testing.T) {
 	s := integrationStore(t)
 	ctx := context.Background()
 	run := durableFixture(t, "test-publish-success-cancel-"+newID())
-	t.Cleanup(func() { _, _ = s.db.Exec(`DELETE FROM mitigation_check_run WHERE request_id=$1`, run.RequestID) })
+	t.Cleanup(func() { _, _ = s.db.Exec(`DELETE FROM defense_validation_run WHERE request_id=$1`, run.RequestID) })
 	if _, _, err := s.CreateOrGet(ctx, run); err != nil {
 		t.Fatal(err)
 	}
@@ -350,7 +350,7 @@ func TestCanceledAmbiguousPublicationReconcilesAuthoritativeRow(t *testing.T) {
 			s := integrationStore(t)
 			ctx := context.Background()
 			run := durableFixture(t, "test-cancel-reconcile-"+newID())
-			t.Cleanup(func() { _, _ = s.db.Exec(`DELETE FROM mitigation_check_run WHERE request_id=$1`, run.RequestID) })
+			t.Cleanup(func() { _, _ = s.db.Exec(`DELETE FROM defense_validation_run WHERE request_id=$1`, run.RequestID) })
 			if _, _, err := s.CreateOrGet(ctx, run); err != nil {
 				t.Fatal(err)
 			}
@@ -387,7 +387,7 @@ func TestCanceledAmbiguousPublicationReconcilesAuthoritativeRow(t *testing.T) {
 				if _, ok, err := s.LeaseNext(ctx, "worker-too-early", time.Minute, worker.maxAttempts); err != nil || ok {
 					t.Fatalf("verification retry was immediately leaseable: ok=%t err=%v", ok, err)
 				}
-				if _, err := s.db.Exec(`UPDATE mitigation_check_run SET publication_retry_at=now()-interval '1 second' WHERE run_id=$1`, run.RunID); err != nil {
+				if _, err := s.db.Exec(`UPDATE defense_validation_run SET publication_retry_at=now()-interval '1 second' WHERE run_id=$1`, run.RunID); err != nil {
 					t.Fatal(err)
 				}
 				publisher.verifyState = publicationUnknown
@@ -415,7 +415,7 @@ func TestCanonicalResultBytesSurviveMigrationRecoveryAndResultEndpoint(t *testin
 	s := integrationStore(t)
 	ctx := context.Background()
 	run := durableFixture(t, "test-canonical-recovery-"+newID())
-	t.Cleanup(func() { _, _ = s.db.Exec(`DELETE FROM mitigation_check_run WHERE request_id=$1`, run.RequestID) })
+	t.Cleanup(func() { _, _ = s.db.Exec(`DELETE FROM defense_validation_run WHERE request_id=$1`, run.RequestID) })
 	if _, _, err := s.CreateOrGet(ctx, run); err != nil {
 		t.Fatal(err)
 	}
@@ -439,10 +439,10 @@ func TestCanonicalResultBytesSurviveMigrationRecoveryAndResultEndpoint(t *testin
 		t.Fatalf("mark publication pending: marked=%t err=%v", marked, err)
 	}
 	// Simulate an upgrade from the JSONB-only staging schema, then run migration.
-	if _, err := s.db.Exec(`UPDATE mitigation_check_run SET result_payload=NULL WHERE run_id=$1`, run.RunID); err != nil {
+	if _, err := s.db.Exec(`UPDATE defense_validation_run SET result_payload=NULL WHERE run_id=$1`, run.RunID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.db.Exec(`UPDATE mitigation_check_run SET publication_pending=FALSE WHERE run_id=$1`, run.RunID); err != nil {
+	if _, err := s.db.Exec(`UPDATE defense_validation_run SET publication_pending=FALSE WHERE run_id=$1`, run.RunID); err != nil {
 		t.Fatal(err)
 	}
 	if err := migrateLifecycle(s.db); err != nil {
@@ -456,12 +456,12 @@ func TestCanonicalResultBytesSurviveMigrationRecoveryAndResultEndpoint(t *testin
 	if marked, err := s.MarkPublicationPending(ctx, run.RunID, "crashed-worker", leased.LeaseToken); err != nil || !marked {
 		t.Fatalf("restore publication pending: marked=%t err=%v", marked, err)
 	}
-	if _, err := s.db.Exec(`UPDATE mitigation_check_run SET lease_expires_at=now()-interval '1 second' WHERE run_id=$1`, run.RunID); err != nil {
+	if _, err := s.db.Exec(`UPDATE defense_validation_run SET lease_expires_at=now()-interval '1 second' WHERE run_id=$1`, run.RunID); err != nil {
 		t.Fatal(err)
 	}
 	publisher := &exactPayloadVerifier{}
 	worker := NewRunWorker(s, func(context.Context, DurableRun) (RunOutcome, error) {
-		t.Fatal("staged recovery re-executed the mitigation check")
+		t.Fatal("staged recovery re-executed the defense validation")
 		return RunOutcome{}, nil
 	}, publisher)
 	worker.lease = time.Minute
@@ -476,7 +476,7 @@ func TestCanonicalResultBytesSurviveMigrationRecoveryAndResultEndpoint(t *testin
 	previousStore := store
 	store = s
 	t.Cleanup(func() { store = previousStore })
-	request := httptest.NewRequest(http.MethodGet, "/v1/mitigation-check-runs/"+run.RunID+"/result", nil)
+	request := httptest.NewRequest(http.MethodGet, "/v1/defense-validation-runs/"+run.RunID+"/result", nil)
 	response := httptest.NewRecorder()
 	handleRunResult(response, request, run.RunID)
 	if response.Code != http.StatusOK || !bytes.Equal(response.Body.Bytes(), payload) {
@@ -488,7 +488,7 @@ func TestCancellationBeforePublicationWins(t *testing.T) {
 	s := integrationStore(t)
 	ctx := context.Background()
 	run := durableFixture(t, "test-cancel-before-publish-"+newID())
-	t.Cleanup(func() { _, _ = s.db.Exec(`DELETE FROM mitigation_check_run WHERE request_id=$1`, run.RequestID) })
+	t.Cleanup(func() { _, _ = s.db.Exec(`DELETE FROM defense_validation_run WHERE request_id=$1`, run.RequestID) })
 	if _, _, err := s.CreateOrGet(ctx, run); err != nil {
 		t.Fatal(err)
 	}
@@ -518,11 +518,11 @@ func TestAmbiguousFinalPublicationAttemptRecoversByVerificationOnly(t *testing.T
 	s := integrationStore(t)
 	ctx := context.Background()
 	run := durableFixture(t, "test-publish-crash-"+newID())
-	t.Cleanup(func() { _, _ = s.db.Exec(`DELETE FROM mitigation_check_run WHERE request_id=$1`, run.RequestID) })
+	t.Cleanup(func() { _, _ = s.db.Exec(`DELETE FROM defense_validation_run WHERE request_id=$1`, run.RequestID) })
 	if _, _, err := s.CreateOrGet(ctx, run); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.db.Exec(`UPDATE mitigation_check_run SET attempt=2 WHERE run_id=$1`, run.RunID); err != nil {
+	if _, err := s.db.Exec(`UPDATE defense_validation_run SET attempt=2 WHERE run_id=$1`, run.RunID); err != nil {
 		t.Fatal(err)
 	}
 	var executions int32
@@ -546,7 +546,7 @@ func TestAmbiguousFinalPublicationAttemptRecoversByVerificationOnly(t *testing.T
 	if _, ok, err := s.LeaseNext(ctx, worker.workerID, worker.lease, worker.maxAttempts); err != nil || ok {
 		t.Fatalf("verification retry ignored backoff: ok=%t err=%v", ok, err)
 	}
-	if _, err := s.db.Exec(`UPDATE mitigation_check_run SET publication_retry_at=now()-interval '1 second' WHERE run_id=$1`, run.RunID); err != nil {
+	if _, err := s.db.Exec(`UPDATE defense_validation_run SET publication_retry_at=now()-interval '1 second' WHERE run_id=$1`, run.RunID); err != nil {
 		t.Fatal(err)
 	}
 	second, ok, err := s.LeaseNext(ctx, worker.workerID, worker.lease, worker.maxAttempts)
@@ -573,7 +573,7 @@ func TestPublicationVerificationRetriesAreBoundedWithBackoff(t *testing.T) {
 	s := integrationStore(t)
 	ctx := context.Background()
 	run := durableFixture(t, "test-verification-bounded-"+newID())
-	t.Cleanup(func() { _, _ = s.db.Exec(`DELETE FROM mitigation_check_run WHERE request_id=$1`, run.RequestID) })
+	t.Cleanup(func() { _, _ = s.db.Exec(`DELETE FROM defense_validation_run WHERE request_id=$1`, run.RequestID) })
 	if _, _, err := s.CreateOrGet(ctx, run); err != nil {
 		t.Fatal(err)
 	}
@@ -603,7 +603,7 @@ func TestPublicationVerificationRetriesAreBoundedWithBackoff(t *testing.T) {
 	if _, ok, err := s.LeaseNext(ctx, "worker-busy-loop", time.Minute, worker.maxAttempts); err != nil || ok {
 		t.Fatalf("bounded retry was immediately leaseable: ok=%t err=%v", ok, err)
 	}
-	if _, err := s.db.Exec(`UPDATE mitigation_check_run SET publication_retry_at=now()-interval '1 second' WHERE run_id=$1`, run.RunID); err != nil {
+	if _, err := s.db.Exec(`UPDATE defense_validation_run SET publication_retry_at=now()-interval '1 second' WHERE run_id=$1`, run.RunID); err != nil {
 		t.Fatal(err)
 	}
 	second, ok, err := s.LeaseNext(ctx, worker.workerID, worker.lease, worker.maxAttempts)
@@ -627,11 +627,11 @@ func TestCrashAfterMergeBeforeVerificationStateDoesNotFailOrReexecute(t *testing
 	s := integrationStore(t)
 	ctx := context.Background()
 	run := durableFixture(t, "test-post-merge-crash-"+newID())
-	t.Cleanup(func() { _, _ = s.db.Exec(`DELETE FROM mitigation_check_run WHERE request_id=$1`, run.RequestID) })
+	t.Cleanup(func() { _, _ = s.db.Exec(`DELETE FROM defense_validation_run WHERE request_id=$1`, run.RequestID) })
 	if _, _, err := s.CreateOrGet(ctx, run); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.db.Exec(`UPDATE mitigation_check_run SET attempt=2 WHERE run_id=$1`, run.RunID); err != nil {
+	if _, err := s.db.Exec(`UPDATE defense_validation_run SET attempt=2 WHERE run_id=$1`, run.RunID); err != nil {
 		t.Fatal(err)
 	}
 	crashed, ok, err := s.LeaseNext(ctx, "crashed-worker", time.Minute, 3)
@@ -646,7 +646,7 @@ func TestCrashAfterMergeBeforeVerificationStateDoesNotFailOrReexecute(t *testing
 	if staged, err := s.StageOutcome(ctx, run.RunID, "crashed-worker", crashed.LeaseToken, outcome, payload); err != nil || !staged {
 		t.Fatalf("stage before simulated crash: staged=%t err=%v", staged, err)
 	}
-	if _, err := s.db.Exec(`UPDATE mitigation_check_run SET lease_expires_at=now()-interval '1 second' WHERE run_id=$1`, run.RunID); err != nil {
+	if _, err := s.db.Exec(`UPDATE defense_validation_run SET lease_expires_at=now()-interval '1 second' WHERE run_id=$1`, run.RunID); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.FailExhausted(ctx, 3); err != nil {
@@ -680,10 +680,10 @@ func TestCrashAfterMergeBeforeVerificationStateDoesNotFailOrReexecute(t *testing
 
 func lifecycleOutcome(run DurableRun) RunOutcome {
 	outcome := RunOutcome{
-		Capability: "mitigation-check", ContractID: contractID, RequestID: run.RequestID,
+		Capability: "defense-validation", ContractID: contractID, RequestID: run.RequestID,
 		RunID: run.RunID, ResultID: value(run.ResultID), Status: statusCompleted,
 		TerminalState: stateBlocked, CorrelationID: run.CorrelationID,
-		ResultRef:    &ResultRef{System: "databricks", Catalog: "catalog", Schema: "mitigation_check", Table: "results", Key: value(run.ResultID)},
+		ResultRef:    &ResultRef{System: "databricks", Catalog: "catalog", Schema: "defense_validation", Table: "results", Key: value(run.ResultID)},
 		EvidenceRefs: []string{}, CreatedAt: time.Now().UTC(),
 	}
 	if err := setCanonicalIntegrity(&outcome); err != nil {

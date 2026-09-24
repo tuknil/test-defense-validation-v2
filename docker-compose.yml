@@ -1,7 +1,7 @@
-# mitigation-check: UI + API + Postgres as containers.
+# defense-validation: UI + API + Postgres as containers.
 #
 # The API launches the validation-substrate container on the host Docker daemon
-# (mounted docker.sock) and attaches it to the shared `mitigation-net` network,
+# (mounted docker.sock) and attaches it to the shared `defense-validation-net` network,
 # reaching it by name. The run ledger lives in the `db` Postgres container; its
 # data is on the named volume `pgdata`, which survives `docker stop` and
 # `docker rm` of the db container (only `docker compose down -v` deletes it).
@@ -9,7 +9,7 @@
 services:
   db:
     image: artifact.it.att.com/astra-secure-container-catalog/postgresql:17.10-r1@sha256:c2ceffcba898b179fccfb526396f301a965fbd895d2b28e5484ed62789fac042
-    container_name: mitigation-db
+    container_name: defense-validation-db
     environment:
       POSTGRES_USER: mc
       POSTGRES_PASSWORD: mc
@@ -17,7 +17,7 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data      # durable ledger data
     networks:
-      - mitnet
+      - dvnet
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U mc -d mitigation"]
       interval: 5s
@@ -27,8 +27,8 @@ services:
 
   api:
     build: ./api
-    image: mitigation-check-api
-    container_name: mitigation-api
+    image: defense-validation-api
+    container_name: defense-validation-api
     environment:
       PORT: "8137"
       GODEBUG: x509negativeserial=1
@@ -46,11 +46,11 @@ services:
       DATABASE_SSL_MODE: ${DATABASE_SSL_MODE:-}
       DATABASE_MIGRATION_MODE: ${DATABASE_MIGRATION_MODE:-}
       AZURE_POSTGRES_TOKEN_SCOPE: ${AZURE_POSTGRES_TOKEN_SCOPE:-}
-      MC_SUBSTRATE_NETWORK: mitigation-net
+      DV_SUBSTRATE_NETWORK: defense-validation-net
       # Azure ACI execution mode (optional).
       AZURE_SUBSCRIPTION_ID: ${AZURE_SUBSCRIPTION_ID:-}
-      MC_ACI_RESOURCE_GROUP: ${MC_ACI_RESOURCE_GROUP:-}
-      MC_ACI_REGION: ${MC_ACI_REGION:-}
+      DV_ACI_RESOURCE_GROUP: ${DV_ACI_RESOURCE_GROUP:-}
+      DV_ACI_REGION: ${DV_ACI_REGION:-}
       # Service-principal auth for the "aci-sp" mode (works from a laptop or ACA).
       AZURE_TENANT_ID: ${AZURE_TENANT_ID:-}
       AZURE_CLIENT_ID: ${AZURE_CLIENT_ID:-}
@@ -72,13 +72,13 @@ services:
       db:
         condition: service_healthy
     networks:
-      - mitnet
+      - dvnet
     restart: unless-stopped
 
   ui:
     build: ./ui
-    image: mitigation-check-ui
-    container_name: mitigation-ui
+    image: defense-validation-ui
+    container_name: defense-validation-ui
     environment:
       API_BASE: ${API_BASE:-http://localhost:8137}
     ports:
@@ -86,12 +86,12 @@ services:
     depends_on:
       - api
     networks:
-      - mitnet
+      - dvnet
     restart: unless-stopped
 
 volumes:
   pgdata:
 
 networks:
-  mitnet:
-    name: mitigation-net
+  dvnet:
+    name: defense-validation-net

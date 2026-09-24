@@ -1,15 +1,15 @@
 openapi: 3.0.3
 info:
-  title: mitigation-check API
+  title: defense-validation API
   version: "1.0"
   description: >
     Fast block/pass proof capability for one candidate mitigation against one
-    test basis in one bounded validation substrate (contract `mitigation-check@1.0`).
+    test basis in one bounded validation substrate (contract `defense-validation@1.0`).
     The additive `shared-attack-contracts-v2` route consumes compact immutable
     Check Generation and Defense Generation locators plus an approved profile ID,
     executes every required obligation/input assignment, and returns exact coverage accounting.
     Canonical submission is asynchronous and creates a durable PostgreSQL run
-    before a leased worker executes the existing mitigation-check executor.
+    before a leased worker executes the existing defense-validation executor.
     Valid transitions are queued to running to a terminal state, queued to
     canceled, running to queued for publication retry, and expired running to
     failed or canceled during recovery. Terminal runs are immutable.
@@ -18,9 +18,9 @@ servers:
     description: Local / Docker Compose
 
 paths:
-  /v1/mitigation-check-runs:
+  /v1/defense-validation-runs:
     post:
-      summary: Submit a durable asynchronous mitigation-check run
+      summary: Submit a durable asynchronous defense-validation run
       operationId: submitRun
       description: >
         Validates and durably queues work, then immediately returns. Identical
@@ -39,15 +39,15 @@ paths:
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/SubmitMitigationCheckRequest"
+              $ref: "#/components/schemas/SubmitDefenseValidationRequest"
             examples:
               truePositive:
                 summary: Attack correctly blocked (TP)
                 value:
-                  contract_id: mitigation-check@1.0
+                  contract_id: defense-validation@1.0
                   candidate_artifact_id: candidate:log4shell:waf-rule:strict
                   test_basis_id: test-basis:log4shell:attack:jndi-ldap
-                  check_profile_id: mitigation-check-profile:waf-http:1
+                  check_profile_id: defense-validation-profile:waf-http:1
                   substrate_selector: substrate:log4j-vulnerable-webserver:container
                   substrate:
                     kind: container-image
@@ -117,7 +117,7 @@ paths:
                 items:
                   $ref: "#/components/schemas/RunSummary"
 
-  /v1/mitigation-check-runs/{run_id}:
+  /v1/defense-validation-runs/{run_id}:
     get:
       summary: Get cheap compact run status
       operationId: getRun
@@ -127,7 +127,7 @@ paths:
           required: true
           schema:
             type: string
-          example: mc-run-a2366a64394de5472eb39642
+          example: dv-run-a2366a64394de5472eb39642
       responses:
         "200":
           description: Side-effect-free status envelope.
@@ -142,7 +142,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
 
-  /v1/mitigation-check-runs/{run_id}/result:
+  /v1/defense-validation-runs/{run_id}/result:
     get:
       summary: Get the immutable terminal result
       operationId: getRunResult
@@ -170,7 +170,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
 
-  /v1/mitigation-check-runs/{run_id}/cancel:
+  /v1/defense-validation-runs/{run_id}/cancel:
     post:
       summary: Idempotently request cancellation
       operationId: cancelRun
@@ -186,7 +186,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/RunStatus"
 
-  /v1/compat/mitigation-check-runs:
+  /v1/compat/defense-validation-runs:
     post:
       summary: Execute synchronously for legacy UI compatibility
       deprecated: true
@@ -196,7 +196,7 @@ paths:
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/SubmitMitigationCheckRequest"
+              $ref: "#/components/schemas/SubmitDefenseValidationRequest"
       responses:
         "200":
           description: Full terminal result.
@@ -257,7 +257,7 @@ components:
       required: true
       schema: { type: string }
   schemas:
-    SubmitMitigationCheckRequest:
+    SubmitDefenseValidationRequest:
       type: object
       additionalProperties: false
       required: [contract_id]
@@ -268,7 +268,7 @@ components:
       properties:
         contract_id:
           type: string
-          enum: ["mitigation-check@1.0"]
+          enum: ["defense-validation@1.0"]
         request_id:
           type: string
           minLength: 1
@@ -347,11 +347,11 @@ components:
         upstream_inputs:
           type: array
           description: >
-            Upstream-mode input (env MC_INPUT_UPSTREAM). Each entry's result_ref
+            Upstream-mode input (env DV_INPUT_UPSTREAM). Each entry's result_ref
             points at a Databricks row; the mitigation rule is read from the rule
             entry's result_json.primary_candidate.artifact_content. The test still
             comes from test_basis. The top-level contract remains
-            "mitigation-check@1.0" and canonical identity fields remain required.
+            "defense-validation@1.0" and canonical identity fields remain required.
           items:
             $ref: "#/components/schemas/UpstreamInput"
         primary_candidate:
@@ -376,8 +376,8 @@ components:
       type: object
       required: [capability, contract_id, request_id, correlation_id, run_id, status, status_url, result_url, accepted_at]
       properties:
-        capability: { type: string, enum: [mitigation-check] }
-        contract_id: { type: string, enum: ["mitigation-check-run-submission@1.0"] }
+        capability: { type: string, enum: [defense-validation] }
+        contract_id: { type: string, enum: ["defense-validation-run-submission@1.0"] }
         request_id: { type: string }
         correlation_id: { type: string }
         run_id: { type: string }
@@ -390,7 +390,7 @@ components:
       type: object
       required: [capability, contract_id, request_id, correlation_id, run_id, status, created_at, updated_at, progress]
       properties:
-        capability: { type: string, enum: [mitigation-check] }
+        capability: { type: string, enum: [defense-validation] }
         contract_id: { type: string, enum: ["capability-run-status@1.0"] }
         request_id: { type: string }
         correlation_id: { type: string }
@@ -413,7 +413,7 @@ components:
       type: object
       required: [capability, contract_id, request_id, correlation_id, run_id, result_id, status, terminal_state, result_ref, evidence_refs, content_sha256, size_bytes, created_at]
       properties:
-        capability: { type: string, enum: [mitigation-check] }
+        capability: { type: string, enum: [defense-validation] }
         contract_id: { type: string, enum: ["capability-completion@1.0"] }
         request_id: { type: string }
         correlation_id: { type: string }
@@ -584,10 +584,10 @@ components:
       properties:
         capability:
           type: string
-          enum: ["mitigation-check"]
+          enum: ["defense-validation"]
         contract_id:
           type: string
-          enum: ["mitigation-check@1.0"]
+          enum: ["defense-validation@1.0"]
         request_id:
           type: string
         run_id:
@@ -658,7 +658,7 @@ components:
           allOf:
             - $ref: "#/components/schemas/CandidateSpec"
           description: >
-            The actual mitigation rule that was run (embedded so a mitigation_check
+            The actual mitigation rule that was run (embedded so a defense_validation
             row is self-contained; consumers need not query the upstream table).
         test_basis:
           allOf:
@@ -700,13 +700,13 @@ components:
           type: string
         table:
           type: string
-          example: mitigation_check
+          example: defense_validation
         key:
           type: string
           description: >
             The result_id value itself — the same string in the top-level result_id
             and in the table's result_id column. Query WHERE result_id = <key>.
-          example: "mitigation-check-result:1c40b2497a6f766452572f2c"
+          example: "defense-validation-result:1c40b2497a6f766452572f2c"
 
     Outcome:
       type: object
@@ -868,7 +868,7 @@ components:
           type: string
           format: date-time
         request:
-          $ref: "#/components/schemas/SubmitMitigationCheckRequest"
+          $ref: "#/components/schemas/SubmitDefenseValidationRequest"
         response:
           $ref: "#/components/schemas/RunOutcome"
 
