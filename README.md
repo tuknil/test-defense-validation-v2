@@ -1,0 +1,460 @@
+# mitigation-check webapp
+
+A stepwise prototype of the `mitigation-check@1.0` capability (see
+[mitigation-check-lld.md](mitigation-check-lld.md)), built as a **separate UI and
+Go API server**.
+
+## Durable asynchronous lifecycle
+
+The canonical orchestration API persists a queued PostgreSQL ledger row before
+returning `202 Accepted`:
+
+- `POST /v1/mitigation-check-runs`
+- `GET /v1/mitigation-check-runs/{run_id}`
+- `GET /v1/mitigation-check-runs/{run_id}/result`
+- `POST /v1/mitigation-check-runs/{run_id}/cancel`
+
+Submission requires `Idempotency-Key` and `X-Correlation-ID`. The body
+`request_id` may be omitted during migration and is then populated from
+`Idempotency-Key`; when present it must match. Body `correlation_id` may likewise
+be populated from `X-Correlation-ID` and must match when present. Semantically
+identical retries return the existing run, while a different normalized request
+under the same key returns `409 idempotency_conflict`.
+
+An in-process worker atomically leases queued work, heartbeats running work, and
+recovers expired leases with a bounded attempt count. Every claim has a unique
+lease token; heartbeats, staging, publication, completion, failure, and
+cancellation are fenced by that token. Heartbeat errors or ownership loss cancel
+the active executor. If a worker disappears during cancellation, lease-expiry
+recovery completes the transition to `canceled`.
+
+The accepted contract is always `mitigation-check@1.0`, independent of
+`MC_INPUT_UPSTREAM`. Canonical requests may carry inline artifacts,
+`upstream_inputs`, or both. Upstream resolution is selected only when configured
+and `upstream_inputs` is present. Omitted `execution_mode`, request method,
+request path, and request headers are normalized to `inmemory`, `GET`, `/`, and
+an empty object before the idempotency digest is calculated.
+
+An additive reference-only mode accepts no executable inline content. It requires
+`route_policy: registered-waf-route-v1` and exactly two complete immutable
+locators in `defense_result` and `check_result`. The resolver directly queries
+only `36889_janus_dev.defense_generation.defense_generation_results` and
+`36889_janus_dev.check_generation.check_generation_results`, requires exactly
+one row from each, verifies row and logical-result identity and SHA-256 metadata,
+and hydrates a Check Generation payload only from the fixed managed Volume
+`/Volumes/36889_janus_dev/check_generation/payloads`. A supplied `test_basis_id`
+is a non-executable selector and must exactly identify an eligible
+`mitigation-checkable-signal` HTTP artifact; when omitted, the first eligible
+artifact is selected. The resolver verifies the complete current Defense
+Generation canonical producer shape, including fully populated upstream result
+references, checks `primary_candidate.artifact_hash` against the exact artifact
+content, and validates the Check Generation persisted wrapper plus strict
+completion/result contract versions. Both verified locators and the selected
+artifact ID are retained in result `input_provenance`, while verified producer
+evidence lineage is stably deduplicated into result `evidence_refs`. Locator SQL
+queries have a fixed 60-second deadline. Databricks input resolution is created
+only when a reference-only run executes; inline and local startup remain usable
+without Databricks input configuration.
+
+The WAF-first shared-contract path is additive and selected with
+`route_policy: shared-attack-contracts-v2` and `profile_id: waf-standard@2`.
+Its request contains only the authenticated CG and DG immutable locators, never
+hydrated producer bodies. It first verifies both outer producer results, then
+validates the embedded `attack-match-semantics@2.0` and
+`candidate-bundle@1.0` against the repository-local Draft 2020-12 schemas. It
+also verifies RFC 8785 digests, CG source projection and complete ancestry,
+every DG artifact and directive, exact obligation mappings, candidate and bundle
+digests, and the complete all-or-nothing application unit. The older
+`registered-waf-route-v1` and inline/upstream paths are unchanged for replay.
+
+V2 constructs every exact required `(obligation_id, input_id)` assignment. It
+applies and reads back all candidate artifacts before executing any case, then
+executes query, named-header, cookie, method, raw-body, and JSON-body HTTP inputs
+without converting absent, empty, and present body states into one another.
+Non-HTTP inputs in the WAF-first slice receive an explicit `unsupported`
+disposition. Safety stops are likewise retained as case dispositions.
+
+Destination-free `http-request-template` inputs resolve only through the
+embedded `waf-standard@2` profile. The immutable `waf-standard@1` profile remains
+available for legacy replay. The adapter may add only scheme, authority,
+and path. Each case records its template input ID and path key, resolver and
+profile IDs, immutable resolver/profile digest, and exact rendered request.
+Unknown profiles or path keys fail closed. Results add `profile_id`, complete
+`obligation_results`, the read-back `application_unit`, and
+`CoverageAccounting`; represented and unsupported source-member sets are
+disjoint and complete, and every unaccounted count is zero.
+
+Exact schemas, the offline catalog, route profile, direct CG/DG chain fixtures,
+and provenance manifests are checked into `api/contracts/shared-attack-contracts`
+and `api/testdata/shared-attack-contracts-v2`. Runtime schema resolution has no
+network loader. The approved Draft 2020-12 validator is vendored under
+`api/third_party/jsonschema`, so standalone CI has no sibling-repository dependency.
+
+Completed results are staged in PostgreSQL before external publication. The
+Databricks writer uses an insert-only `MERGE` keyed by `result_id`, then reads the
+row back and requires exact `run_id` and JSON equality. Recovery republishes the
+same staged bytes and never reruns the check. A completed response advertises a
+Databricks `result_ref` only when a fully qualified destination is configured and
+publication succeeds; otherwise the run fails without a fabricated reference.
+The immutable result includes the normalized request digest, exact upstream
+result identities, and deduplicated upstream evidence references used by the
+check.
+
+Optional callback delivery is enabled by supplying `X-Janus-Callback-URL`,
+`X-Janus-Callback-Workflow-ID`, and `X-Janus-Callback-Signal` together. The URL
+must use HTTPS, the signal must equal `janus.capability-completion.v1`, and an
+optional `CAPABILITY_CALLBACK_ALLOWED_HOSTS` comma-separated allowlist restricts
+the destination hostname. Body-level `callback` metadata is rejected.
+
+After a terminal status and corresponding result response are committed, the
+same PostgreSQL transaction makes one stable outbox event eligible for delivery:
+`mitigation-check:<run_id>:terminal:v1`. A separate leased dispatcher posts only
+the workflow ID and wakeup identifiers using `CAPABILITY_CALLBACK_TOKEN`; the
+canonical result body is never included. Delivery is at least once with jittered
+backoff, `Retry-After` support, and indefinite 15-minute retries after the
+initial schedule. Polling remains available when delivery fails or callbacks are
+not configured. The callback token is never returned or logged.
+Errors from the canonical lifecycle endpoints are root objects containing
+`code`, `detail`, and `retryable`. Submission accepts only the
+`application/json` media type (parameters such as `charset` are allowed).
+
+Valid transitions are `queued -> running -> completed|failed|canceled`,
+`queued -> canceled`, `running -> queued` for a fenced publication retry, and
+expired `running -> failed|canceled` during recovery. Terminal states are
+immutable.
+
+The existing executor and UI remain available through the clearly separate,
+deprecated synchronous path `POST /v1/compat/mitigation-check-runs`. Enabling
+`MC_INPUT_UPSTREAM` does not reroute an inline compatibility request unless that
+request actually contains `upstream_inputs`.
+
+## Step 1 — Submit a mitigation-check run
+
+Scope: create a mitigation scenario aligned with the input contract, render a
+form to display/edit the input payload, and POST it.
+
+- **API** (`api/`) — Go server exposing `POST /v1/mitigation-check-runs`
+  (LLD §9.1). It strictly validates the `SubmitMitigationCheckRequest@1` contract
+  (LLD §10.1): `contract_id` const, required non-empty `candidate_artifact_id` /
+  `test_basis_id` / `check_profile_id`, optional `substrate_selector`, and
+  rejects unknown fields (`additionalProperties: false`). On success it returns
+  an accepted run reference `{run_id, result_id, status:"accepted"}`. Errors use
+  the controlled `invalid-input` category (LLD §9.5).
+- **UI** (`ui/`) — static HTML/CSS/JS. A contract-aligned form pre-filled with
+  the LLD §9.1 example scenario, a live JSON request preview, and a Submit button
+  that POSTs to the API.
+
+Out of scope for Step 1: queue, persistence, events.
+
+## Step 2 — Actually execute the scenario on submit
+
+On submit the API now runs the scenario for real (LLD §5, §6.4 local-WAF
+substrate adapter, §6.5 verdict engine):
+
+1. **Bring up the substrate** — `docker run` the container image named in the
+   request body (e.g. `ghcr.io/christophetd/log4shell-vulnerable-app`) on a
+   private `127.0.0.1` port and wait until it is ready.
+2. **Apply the candidate** — parse the candidate's actual ModSecurity `SecRule`
+   (its `@rx` pattern + `id`/`status` actions) and stand it up as an in-process
+   WAF in front of the container.
+3. **Run the test** — send the supplied attack request through the WAF.
+4. **Observe & decide** — a match denies at the WAF → `blocked`; otherwise the
+   request reaches the live app and its status is observed → `not-blocked`. If the
+   container can't be brought up or observed → `could-not-test` (never a
+   fabricated verdict, per LLD §7.2).
+5. **Tear down** the container (`--rm`).
+
+The response returns the terminal state plus **actual vs expected** and an
+execution step log. Requires a running Docker daemon; without one the run
+returns `could-not-test` with a reason.
+
+> The WAF faithfully enforces the *specific* SecRule shipped in the candidate
+> (pattern, targets, deny/status). It is not the full ModSecurity engine —
+> swapping in a real ModSecurity container is an adapter change behind the same
+> flow.
+
+### Execution mode: local Docker vs Azure ACI
+
+The substrate can be brought up two ways, selected by the **Execution mode**
+toggle in the UI (or `execution_mode` in the request: `local` | `aci`). Only the
+bring-up/teardown differs — the WAF, test, and verdict are identical.
+
+- **`local`** — `docker run` on the host daemon (`docker.sock`). What
+  Docker Compose uses.
+
+- **`inmemory`** (**default** when the request omits `execution_mode`) — runs the whole scenario **inside the API process**: the target
+  is an in-process HTTP stand-in (started on a loopback port), with the same
+  in-memory WAF in front. **No Docker socket, no external container, no cloud, no
+  network** — so it runs anywhere (including ACA) and completes in milliseconds.
+  Fidelity trade-off: the target is a stand-in, not the real CVE image, so it
+  validates the **rule logic**, not the real vulnerable binary (a weaker proof
+  than `local`/`aci`). Great for fast rule iteration and CI. Because the target is
+  a stand-in, the request may **omit `substrate` entirely** in this mode (the
+  result records `image: "(no substrate provided)"`); every other mode still
+  requires `substrate.image` and returns `could-not-test` without it.
+
+- **`firewall`** — a **separate in-memory evaluator** for **network firewall rules
+  (L3/L4)**, distinct from the L7 WAF path. No substrate/container: it parses the
+  candidate firewall rule and a supplied **network-connection** test (5-tuple) and
+  decides block/pass in-process. Fits Log4Shell as an **egress control** — a rule
+  that denies the outbound JNDI callback (LDAP/RMI) mitigates exploitation.
+
+  Two `candidate.rule` syntaxes are accepted (both evaluated in-memory against the
+  connection 5-tuple):
+  - **compact:** `<action> <proto> <src> -> <dst>[:<port|lo-hi|*>]`, e.g.
+    `deny tcp any -> any:1389`;
+  - **iptables** (set `engine: "iptables"` or use a rule with `-j`), e.g.
+    `-A OUTPUT -p tcp -m multiport --dports 389,636,1099,1389 -j DROP` — it parses
+    `-p`, `-s`, `-d` (IP/CIDR), `--dport` (single or `lo:hi`), `-m multiport
+    --dports`, and `-j DROP|REJECT|ACCEPT`.
+
+  The test is
+  `{ kind: "network-connection", connection: {protocol, src_ip, dst_ip, dst_port}, expected: {blocked} }`.
+  See `scenarios/05-firewall-egress-block.json` (compact TP),
+  `scenarios/06-firewall-egress-miss.json` (compact FN),
+  `scenarios/09-firewall-iptables-block.json` (iptables TP) and
+  `scenarios/10-firewall-iptables-miss.json` (iptables FN — rule too narrow).
+- **`aci`** — Azure Container Instances. For when the API is hosted on **Azure
+  Container Apps**, which can't mount a Docker socket or launch sibling
+  containers. The adapter creates a per-run ACI container group, runs the test
+  against it over the network, then deletes it (LLD §3.3, §6.4 pluggable
+  substrate adapter). It authenticates with `DefaultAzureCredential` (a managed
+  identity on ACA, or env/`az` locally) and needs:
+
+  ```
+  AZURE_SUBSCRIPTION_ID, MC_ACI_RESOURCE_GROUP, MC_ACI_REGION
+  ```
+
+  Optional: `MC_ACI_CPU`, `MC_ACI_MEMORY_GB`, and private-registry creds via
+  `MC_ACI_REGISTRY_*` (falls back to `JFROG_*`). When Azure isn't configured, an
+  `aci` run returns `could-not-test` with that reason rather than failing — so
+  the mode is selectable everywhere; real execution needs Azure.
+
+- **`aci-sp`** — same ACI substrate, but authenticated with an explicit **service
+  principal** instead of a managed identity. Portable: works from a **laptop** or
+  on **ACA** with the same env vars. In addition to the three `AZURE_*`/`MC_ACI_*`
+  values above, set:
+
+  ```
+  AZURE_TENANT_ID, AZURE_CLIENT_ID, AZURE_CLIENT_SECRET
+  ```
+
+  (The `aci` mode also accepts these via `DefaultAzureCredential`; `aci-sp` just
+  makes the service-principal path explicit and required.)
+
+- **`github`** — runs the scenario on a **GitHub Actions** runner. On submit the
+  API dispatches a `workflow_dispatch` in the configured repo (passing the run id
+  + the scenario as inputs), waits for the run to complete, downloads the result
+  artifact, and stores it — so the ledger row is identical to a local run. The
+  workflow (`.github/workflows/mitigation-check.yml`) runs **this same executor**
+  via the `run-scenario` CLI, so the logic is shared, not reimplemented. Config
+  (via docker compose `.env`):
+
+  ```
+  GITHUB_REPO=owner/repo        # repo that holds the workflow (on its default branch)
+  GITHUB_USERNAME=<user>        # informational
+  GITHUB_TOKEN=<PAT>            # actions:write on that repo
+  GITHUB_WORKFLOW=mitigation-check.yml   # optional (default)
+  GITHUB_REF=main                        # optional (default)
+  ```
+
+  The workflow must exist on the repo's **default branch** for the dispatch API
+  to find it. When GitHub isn't configured a `github` run returns
+  `could-not-test`.
+
+- **`github-ghcr`** — a **separate** GitHub mode (does not modify `github`) that
+  **relays the substrate image through the repo's GHCR** first, so the runner
+  needs no access to the source registry (useful when the source is a private
+  Artifactory the runner can't reach). On submit the API:
+  1. sets a repo Actions secret `GHCR_PAT` (libsodium sealed box) so the runner
+     can pull the private relayed image — there is no API to change package
+     visibility, so it grants the runner a read token instead;
+  2. pulls the source image locally, retags it `ghcr.io/<owner>/<name>`, and
+     pushes it (host-daemon push);
+  3. dispatches `.github/workflows/mitigation-check-ghcr.yml`, which logs in to
+     GHCR with `GHCR_PAT` and runs the scenario against the relayed image.
+
+  The relay is **daemonless** (a pure-Go registry-to-registry copy via
+  go-containerregistry) — **no local Docker / docker.sock**, so it runs on Azure
+  Container Apps. It needs egress to both registries and a token with
+  **`write:packages`** (push); the workflow uses the stored token for
+  `read:packages` (pull). A private source registry is authenticated from
+  `MC_ACI_REGISTRY_*` / `JFROG_*` env. The relayed package stays **private**.
+
+### Which modes run on Azure Container Apps (no docker.sock)
+
+| Mode | Runs on ACA? | Why |
+|---|---|---|
+| `inmemory` | ✅ | in-process |
+| `aci` / `aci-sp` | ✅ | Azure API, no local Docker |
+| `github` | ✅ | just dispatches over HTTP; substrate runs on the runner |
+| `github-ghcr` | ✅ | daemonless relay + HTTP dispatch |
+| `local` | ❌ | needs the host Docker socket (local dev only) |
+
+## Step 3 — Run ledger
+
+Every submitted run is recorded in an in-memory ledger (LLD §11.1), keeping the
+**exact immutable request bytes** alongside the executed result.
+
+- `GET /v1/mitigation-check-runs` — list runs, newest first (compact summaries).
+- `GET /v1/mitigation-check-runs/{run_id}` — one run's immutable `request` + full
+  `response`.
+
+The UI shows a left **Runs** panel; clicking a run opens its immutable request
+(marked immutable) and rendered result on the right.
+
+**Persistence — PostgreSQL container.** The ledger is stored in a `db` Postgres
+service (`postgres:16-alpine`) defined in `docker-compose.yml`. The immutable
+request and the executed response are `JSONB` columns of `mitigation_check_run`.
+The API connects via `DATABASE_URL` (default `postgres://mc:mc@db:5432/mitigation`)
+and waits for the db healthcheck before serving.
+
+The db data lives on the named volume `pgdata` (`/var/lib/postgresql/data`), so
+runs are **durable across `docker stop` and `docker rm` of the db container** —
+recreate it and the data is intact; the API's connection pool reconnects
+automatically. Only `docker compose down -v` deletes the volume.
+
+**Authoritative result sink — Databricks.** A canonical async completion is
+published to a Databricks Delta table. The `result_id` column stores the run's full
+`result_id` value (`mitigation-check-result:<hex>`), and the
+[result envelope](#result-envelope)'s `result_ref.key` reports that same value, so
+a consumer can `SELECT … WHERE result_id = '<value>'`. Publication is an
+insert-only, idempotent `MERGE` with exact read-back verification. A transient
+failure retries the staged result under a new fenced lease; exhaustion or an
+unconfigured sink fails the run without returning a Databricks reference. Config
+(put the DSN, which carries a token, in
+`.env` — never in `docker-compose.yml`):
+
+```
+DATABRICKS_DSN=token:<PAT>@<host>/sql/1.0/warehouses/<id>
+DATABRICKS_CATALOG=...
+DATABRICKS_SCHEMA=...
+DATABRICKS_TABLE=mitigation_check
+```
+
+Target table:
+`mitigation_check(run_id string, result_id string, result_json STRING, primary key(run_id, result_id))`.
+The host must be reachable from the API and the workspace's IP access list must
+allow it. A `403 "Unauthorized network access"` means the API's authorized route
+or workspace access configuration must be corrected.
+
+### Result envelope
+
+Every run response (and the stored ledger/`GET` record) leads with a compact
+envelope, then **appends** the full verdict detail (`match`, `expected`, `actual`,
+`substrate`, the resolved `candidate` rule and `test_basis`, `steps`, …). The
+`candidate` and `test_basis` are embedded so a `mitigation_check` row is
+self-contained — a downstream consumer reads the rule and test from that row and
+need not query the upstream table the rule was sourced from:
+
+```json
+{
+  "capability": "mitigation-check",
+  "contract_id": "mitigation-check@1.0",
+  "run_id": "mc-run-…",
+  "result_id": "mitigation-check-result:1c40b2497a6f766452572f2c",
+  "terminal_state": "blocked",
+  "status": "completed",
+  "correlation_id": "mc-request:CVE-2021-44228:waf:1",
+  "result_ref": {
+    "system": "databricks", "catalog": "…", "schema": "…", "table": "mitigation_check",
+    "key": "mitigation-check-result:1c40b2497a6f766452572f2c"
+  },
+  "evidence_refs": []
+}
+```
+
+- `terminal_state` — the test result (`blocked` / `not-blocked` / `could-not-test`
+  / `scope-declined` / `malfunction`).
+- `status` — canonical async lifecycle status. `completed` is exposed only after
+  authoritative Databricks publication; `failed` includes a stable failure
+  envelope. The deprecated synchronous compatibility path may still report its
+  legacy `storage-failed` value.
+- `correlation_id` — echoed from the request when supplied (optional).
+- `result_ref` — points at the Databricks row for this result. `key` is the
+  `result_id` value itself (the same string in the top-level `result_id` and in
+  the table's `result_id` column), so a consumer can
+  `SELECT … WHERE result_id = '<key>'`.
+
+For a local (non-Docker) API run, point `DATABASE_URL` at any reachable Postgres.
+
+### Input contract: rule read from Databricks (upstream mode)
+
+A **separate executor**, **on by default** (set env **`MC_INPUT_UPSTREAM`** to
+`0`/`false`/`no` to fall back to the legacy inline-`candidate` executor), serves the same
+`POST /v1/mitigation-check-runs` endpoint with a different input contract. Instead
+of inline artifacts the request carries **`upstream_inputs`** — each entry's
+`result_ref` points at a Databricks row — and entries are selected **by
+`capability`**:
+
+- **`defense-generation`** → the mitigation **rule**: `SELECT result_json FROM
+  catalog.schema.table WHERE result_id = key` (using `DATABRICKS_DSN`) and extract
+  `primary_candidate.artifact_content` (kind/engine/action derived from it).
+- **`check-generation`** → the **test**: read the same way, then take
+  `result_json.run_result` and feed it to the standalone stimulus converter
+  (`parseStimulus` → `TestBasisFromStimulus`) to build the `test_basis`.
+
+Precedence for the test: an **inline `test_basis` in the request wins**; otherwise
+it is derived from the `check-generation` entry. The resolved rule/test are fed to
+the shared executor, so bring-up / WAF / verdict are identical to the default path.
+A read/parse failure yields `could-not-test` (never a fabricated verdict); a
+missing `defense-generation` entry is `could-not-test` (no rule).
+- Upstream mode is the default; set `MC_INPUT_UPSTREAM=0` to run only the inline
+  executor. Both paths require canonical `contract_id: "mitigation-check@1.0"`.
+
+## Run it — Docker (recommended)
+
+Both services run as containers via Docker Compose:
+
+```bash
+docker compose up -d --build
+```
+
+- UI → http://localhost:8082
+- API → http://localhost:8137
+- API docs (Swagger UI) → http://localhost:8137/docs · spec at http://localhost:8137/openapi.yaml
+
+The UI's API endpoint is **not hardcoded** — it's injected at container start from the
+`API_BASE` env var (default `http://localhost:8137`). The nginx entrypoint renders
+`env.js` (`window.MC_API_BASE`) via `envsubst`, and the UI reads it (the field stays
+editable for manual override). For ACA, set `API_BASE` to the API app's public FQDN.
+
+Then stop with `docker compose down` (keep `-v` off to preserve the ledger).
+
+**Requires the host Docker socket.** The API launches the validation-substrate
+container on the host daemon (`/var/run/docker.sock` is mounted) and attaches it
+to the shared `mitigation-net` network, reaching it by container name — so the
+containerized API can bring up substrates just like the local build.
+
+### Ledger durability
+
+The run ledger is stored on the named volume `ledger-data` (mounted at
+`/app/data`). It **survives `docker stop` and `docker rm`** of the API container —
+recreate the container and past runs reload automatically. Only
+`docker compose down -v` deletes the volume.
+
+## Run it — local (without Docker for the app itself)
+
+**API** (defaults to port 8090; override with `PORT`):
+
+```bash
+cd api && PORT=8137 go run .
+```
+
+**UI** (any static file server):
+
+```bash
+cd ui && python3 -m http.server 5501
+```
+
+Open http://localhost:5501 and set the "API base URL" field to match the API
+port (e.g. `http://localhost:8137`). In local mode the substrate is published on
+`127.0.0.1:<free-port>` instead of the shared network.
+
+## Verify the API directly
+
+```bash
+curl -s -X POST localhost:8137/v1/mitigation-check-runs \
+  -H 'Content-Type: application/json' \
+  -d '{"contract_id":"mitigation-check@1.0","candidate_artifact_id":"candidate:CVE-123:waf:3","test_basis_id":"test-basis:CVE-123:1","substrate_selector":"waf-nonprod-default","check_profile_id":"mitigation-check-profile:waf-http:1"}'
+```

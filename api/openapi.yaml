@@ -1,0 +1,885 @@
+openapi: 3.0.3
+info:
+  title: mitigation-check API
+  version: "1.0"
+  description: >
+    Fast block/pass proof capability for one candidate mitigation against one
+    test basis in one bounded validation substrate (contract `mitigation-check@1.0`).
+    The additive `shared-attack-contracts-v2` route consumes compact immutable
+    Check Generation and Defense Generation locators plus an approved profile ID,
+    executes every required obligation/input assignment, and returns exact coverage accounting.
+    Canonical submission is asynchronous and creates a durable PostgreSQL run
+    before a leased worker executes the existing mitigation-check executor.
+    Valid transitions are queued to running to a terminal state, queued to
+    canceled, running to queued for publication retry, and expired running to
+    failed or canceled during recovery. Terminal runs are immutable.
+servers:
+  - url: http://localhost:8137
+    description: Local / Docker Compose
+
+paths:
+  /v1/mitigation-check-runs:
+    post:
+      summary: Submit a durable asynchronous mitigation-check run
+      operationId: submitRun
+      description: >
+        Validates and durably queues work, then immediately returns. Identical
+        retries reuse the run; reuse with a different normalized digest is 409.
+        Only the application/json media type is accepted. The three optional
+        X-Janus-Callback-* headers enable a durable terminal-state wakeup;
+        polling remains the canonical fallback.
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/CorrelationID"
+        - $ref: "#/components/parameters/CallbackURL"
+        - $ref: "#/components/parameters/CallbackWorkflowID"
+        - $ref: "#/components/parameters/CallbackSignal"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SubmitMitigationCheckRequest"
+            examples:
+              truePositive:
+                summary: Attack correctly blocked (TP)
+                value:
+                  contract_id: mitigation-check@1.0
+                  candidate_artifact_id: candidate:log4shell:waf-rule:strict
+                  test_basis_id: test-basis:log4shell:attack:jndi-ldap
+                  check_profile_id: mitigation-check-profile:waf-http:1
+                  substrate_selector: substrate:log4j-vulnerable-webserver:container
+                  substrate:
+                    kind: container-image
+                    image: ghcr.io/christophetd/log4shell-vulnerable-app:latest
+                    port: 8080
+                    vulnerability_id: CVE-2021-44228
+                  candidate:
+                    kind: waf-rule
+                    engine: modsecurity
+                    rule_id: "1005440"
+                    action: deny
+                    rule: >-
+                      SecRule REQUEST_HEADERS|REQUEST_URI|ARGS "@rx (?i)\$\{jndi:(?:ldaps?|rmi|dns):/[^}]*\}" "id:1005440,phase:2,deny,status:403"
+                  test_basis:
+                    kind: http-request-attack
+                    proof_basis: verified-vuln-artifact
+                    request:
+                      method: GET
+                      path: /
+                      headers:
+                        X-Api-Version: "${jndi:ldap://127.0.0.1:1389/a}"
+                    expected:
+                      classification: true-positive
+                      blocked: true
+                      status_code: 403
+      responses:
+        "202":
+          description: Run durably queued or running.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SubmissionResponse"
+        "200":
+          description: Idempotent replay of an already-terminal run.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SubmissionResponse"
+        "400":
+          description: Request does not satisfy the contract.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "415":
+          description: Content-Type is not application/json.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "409":
+          description: The idempotency key is bound to another request digest.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+    get:
+      summary: List runs (newest first)
+      operationId: listRuns
+      responses:
+        "200":
+          description: Run summaries.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/RunSummary"
+
+  /v1/mitigation-check-runs/{run_id}:
+    get:
+      summary: Get cheap compact run status
+      operationId: getRun
+      parameters:
+        - name: run_id
+          in: path
+          required: true
+          schema:
+            type: string
+          example: mc-run-a2366a64394de5472eb39642
+      responses:
+        "200":
+          description: Side-effect-free status envelope.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RunStatus"
+        "404":
+          description: Run not found.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+
+  /v1/mitigation-check-runs/{run_id}/result:
+    get:
+      summary: Get the immutable terminal result
+      operationId: getRunResult
+      parameters:
+        - $ref: "#/components/parameters/RunID"
+      responses:
+        "200":
+          description: Full immutable result, or terminal failed/canceled status.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/RunOutcome"
+                  - $ref: "#/components/schemas/RunStatus"
+        "409":
+          description: Run is queued or running.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "404":
+          description: Run not found.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+
+  /v1/mitigation-check-runs/{run_id}/cancel:
+    post:
+      summary: Idempotently request cancellation
+      operationId: cancelRun
+      parameters:
+        - $ref: "#/components/parameters/RunID"
+      responses:
+        "200":
+          description: >
+            Current status. Running work remains running while cooperative
+            cancellation is in progress. Terminal runs are never changed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RunStatus"
+
+  /v1/compat/mitigation-check-runs:
+    post:
+      summary: Execute synchronously for legacy UI compatibility
+      deprecated: true
+      operationId: submitRunSynchronously
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SubmitMitigationCheckRequest"
+      responses:
+        "200":
+          description: Full terminal result.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RunOutcome"
+
+  /healthz:
+    get:
+      summary: Liveness probe
+      operationId: health
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: ok
+
+components:
+  parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      schema: { type: string, minLength: 1 }
+    CorrelationID:
+      name: X-Correlation-ID
+      in: header
+      required: true
+      schema: { type: string, minLength: 1 }
+    CallbackURL:
+      name: X-Janus-Callback-URL
+      in: header
+      required: false
+      description: HTTPS orchestration callback endpoint. Required with the other callback headers.
+      schema: { type: string, format: uri, pattern: "^https://" }
+    CallbackWorkflowID:
+      name: X-Janus-Callback-Workflow-ID
+      in: header
+      required: false
+      description: Temporal child workflow ID only; a workflow run ID is never accepted or required.
+      schema: { type: string, minLength: 1 }
+    CallbackSignal:
+      name: X-Janus-Callback-Signal
+      in: header
+      required: false
+      description: Required with the other callback headers.
+      schema: { type: string, enum: ["janus.capability-completion.v1"] }
+    RunID:
+      name: run_id
+      in: path
+      required: true
+      schema: { type: string }
+  schemas:
+    SubmitMitigationCheckRequest:
+      type: object
+      additionalProperties: false
+      required: [contract_id]
+      anyOf:
+        - required: [candidate_artifact_id, test_basis_id, check_profile_id]
+        - required: [request_id, correlation_id, route_policy, defense_result, check_result]
+        - required: [request_id, correlation_id, route_policy, defense_result, check_result, profile_id]
+      properties:
+        contract_id:
+          type: string
+          enum: ["mitigation-check@1.0"]
+        request_id:
+          type: string
+          minLength: 1
+          description: Must equal Idempotency-Key. May be omitted during migration and is then populated from that header.
+        candidate_artifact_id:
+          type: string
+          minLength: 1
+          description: Immutable candidate mitigation reference.
+        test_basis_id:
+          type: string
+          minLength: 1
+          description: >
+            Attack/discriminator reference in inline mode. In reference-only
+            mode this is an optional non-executable selector. When supplied it
+            must exactly equal the artifact_id of an eligible
+            mitigation-checkable-signal HTTP artifact in the verified Check
+            Generation result; no fallback artifact is selected on mismatch.
+        check_profile_id:
+          type: string
+          minLength: 1
+          description: Signed check profile reference.
+        substrate_selector:
+          type: string
+          description: Logical bounded, non-production substrate (optional).
+        execution_mode:
+          type: string
+          enum: [local, inmemory, firewall, aci, aci-sp, github, github-ghcr]
+          default: inmemory
+          description: >
+            Substrate adapter (defaults to "inmemory" when omitted).
+            "local" runs the target on the host Docker daemon;
+            "inmemory" runs an in-process stand-in target inside the API (no Docker/cloud);
+            "firewall" evaluates an L3/L4 firewall rule against a network-connection
+            test in-process (no substrate);
+            "aci" runs it as an Azure Container Instance via DefaultAzureCredential;
+            "aci-sp" is ACI authenticated with a service principal (env vars);
+            "github" dispatches a GitHub Actions workflow that runs the scenario
+            and returns the result;
+            "github-ghcr" is like github but the API first relays the substrate
+            image into the repo's GHCR so the runner needs no source-registry access.
+        correlation_id:
+          type: string
+          description: >
+            Must equal X-Correlation-ID. May be omitted during migration and is
+            then populated from that required header.
+          example: "mc-request:CVE-2021-44228:waf:1"
+        route_policy:
+          type: string
+          enum: [registered-waf-route-v1, shared-attack-contracts-v2]
+          description: >
+            Selects strict reference-only hydration. registered-waf-route-v1 is
+            the legacy single-case route. shared-attack-contracts-v2 verifies the
+            complete CG semantics and DG application unit, then executes every
+            exact obligation/input assignment. Neither route accepts executable
+            candidate or test bodies.
+        profile_id:
+          type: string
+          enum: [waf-standard@1, waf-standard@2]
+          description: >
+            Required only for shared-attack-contracts-v2. Selects the embedded,
+            immutable MC route-adapter profile used for destination-free HTTP templates.
+        defense_result:
+          allOf:
+            - $ref: "#/components/schemas/ImmutableResultLocator"
+          description: Immutable Defense Generation result locator. Required only in reference-only mode.
+        check_result:
+          allOf:
+            - $ref: "#/components/schemas/ImmutableResultLocator"
+          description: Immutable Check Generation result locator. Required only in reference-only mode.
+        substrate:
+          $ref: "#/components/schemas/SubstrateSpec"
+        candidate:
+          $ref: "#/components/schemas/CandidateSpec"
+        test_basis:
+          $ref: "#/components/schemas/TestBasisSpec"
+        upstream_inputs:
+          type: array
+          description: >
+            Upstream-mode input (env MC_INPUT_UPSTREAM). Each entry's result_ref
+            points at a Databricks row; the mitigation rule is read from the rule
+            entry's result_json.primary_candidate.artifact_content. The test still
+            comes from test_basis. The top-level contract remains
+            "mitigation-check@1.0" and canonical identity fields remain required.
+          items:
+            $ref: "#/components/schemas/UpstreamInput"
+        primary_candidate:
+          type: object
+          description: >
+            Upstream defense-generation candidate; artifact_content carries the
+            ModSecurity rule. Accepted so a full defense-generation payload
+            validates. In upstream mode the rule is read from Databricks, not here.
+        callback:
+          type: object
+          deprecated: true
+          description: >
+            Unsupported body-level callback metadata. Use the three
+            X-Janus-Callback-* request headers instead.
+          additionalProperties: false
+          required: [url]
+          properties:
+            url: { type: string, format: uri, pattern: "^https://" }
+            event_contract_id: { type: string, enum: ["capability-run-event@1.0"] }
+
+    SubmissionResponse:
+      type: object
+      required: [capability, contract_id, request_id, correlation_id, run_id, status, status_url, result_url, accepted_at]
+      properties:
+        capability: { type: string, enum: [mitigation-check] }
+        contract_id: { type: string, enum: ["mitigation-check-run-submission@1.0"] }
+        request_id: { type: string }
+        correlation_id: { type: string }
+        run_id: { type: string }
+        status: { type: string, enum: [queued, running, completed, failed, canceled] }
+        status_url: { type: string }
+        result_url: { type: string }
+        accepted_at: { type: string, format: date-time }
+
+    RunStatus:
+      type: object
+      required: [capability, contract_id, request_id, correlation_id, run_id, status, created_at, updated_at, progress]
+      properties:
+        capability: { type: string, enum: [mitigation-check] }
+        contract_id: { type: string, enum: ["capability-run-status@1.0"] }
+        request_id: { type: string }
+        correlation_id: { type: string }
+        run_id: { type: string }
+        status: { type: string, enum: [queued, running, completed, failed, canceled] }
+        terminal_state: { type: string, nullable: true }
+        result_id: { type: string, nullable: true }
+        created_at: { type: string, format: date-time }
+        started_at: { type: string, format: date-time, nullable: true }
+        updated_at: { type: string, format: date-time }
+        completed_at: { type: string, format: date-time, nullable: true }
+        progress: { $ref: "#/components/schemas/Progress" }
+        failure: { $ref: "#/components/schemas/Failure", nullable: true }
+        completion:
+          allOf:
+            - $ref: "#/components/schemas/Completion"
+          nullable: true
+
+    Completion:
+      type: object
+      required: [capability, contract_id, request_id, correlation_id, run_id, result_id, status, terminal_state, result_ref, evidence_refs, content_sha256, size_bytes, created_at]
+      properties:
+        capability: { type: string, enum: [mitigation-check] }
+        contract_id: { type: string, enum: ["capability-completion@1.0"] }
+        request_id: { type: string }
+        correlation_id: { type: string }
+        run_id: { type: string }
+        result_id: { type: string }
+        status: { type: string, enum: [completed] }
+        terminal_state: { type: string, enum: [blocked, not-blocked, could-not-test] }
+        result_ref: { $ref: "#/components/schemas/ResultRef" }
+        evidence_refs:
+          type: array
+          items: { type: string }
+        content_sha256: { type: string, pattern: "^sha256:[0-9a-f]{64}$" }
+        size_bytes: { type: integer, minimum: 1 }
+        created_at: { type: string, format: date-time }
+
+    Progress:
+      type: object
+      properties:
+        phase: { type: string }
+        percent: { type: integer, nullable: true }
+        message: { type: string }
+
+    Failure:
+      type: object
+      required: [code, detail, retryable]
+      properties:
+        code: { type: string }
+        detail: { type: string }
+        retryable: { type: boolean }
+
+    UpstreamInput:
+      type: object
+      properties:
+        capability:
+          type: string
+          example: defense-generation
+        contract_id:
+          type: string
+          example: defense-generation@1.0
+        result_id:
+          type: string
+        result_ref:
+          type: object
+          properties:
+            system: { type: string, example: databricks }
+            catalog: { type: string, example: 36889_janus_dev }
+            schema: { type: string, example: defense_generation }
+            table: { type: string, example: defense_generation_results }
+            key:
+              type: string
+              example: "defense-generation-result:c3b02e61c65fb24b3fa16aaf"
+        evidence_refs:
+          type: array
+          description: >
+            Stable deduplicated lineage from the verified Defense Generation
+            candidate/result and Check Generation completion.
+          items:
+            type: string
+
+    ImmutableResultLocator:
+      type: object
+      additionalProperties: false
+      required: [capability, contract_id, request_id, correlation_id, run_id, result_id, status, terminal_state, result_ref, content_sha256, size_bytes, created_at]
+      properties:
+        capability: { type: string, enum: [defense-generation, check-generation] }
+        contract_id: { type: string, enum: [defense-generation-result@1.0, check-generation-result@1.0] }
+        request_id: { type: string, minLength: 1 }
+        correlation_id: { type: string, minLength: 1 }
+        run_id: { type: string, minLength: 1 }
+        result_id: { type: string, minLength: 1 }
+        status: { type: string, enum: [completed] }
+        terminal_state: { type: string, enum: [candidate-produced, completed] }
+        result_ref: { $ref: "#/components/schemas/ResultRef" }
+        content_sha256: { type: string, pattern: "^sha256:[0-9a-f]{64}$" }
+        size_bytes: { type: integer, minimum: 1, maximum: 209715200 }
+        created_at: { type: string, format: date-time }
+
+    SubstrateSpec:
+      type: object
+      description: Inline validation substrate — a bounded, non-production container image.
+      required: [kind, image]
+      properties:
+        kind:
+          type: string
+          example: container-image
+        image:
+          type: string
+          example: ghcr.io/christophetd/log4shell-vulnerable-app:latest
+        digest:
+          type: string
+        port:
+          type: integer
+          example: 8080
+        vulnerability_id:
+          type: string
+          example: CVE-2021-44228
+
+    CandidateSpec:
+      type: object
+      description: Inline candidate mitigation (here, a ModSecurity WAF rule).
+      required: [kind, rule]
+      properties:
+        kind:
+          type: string
+          example: waf-rule
+        engine:
+          type: string
+          example: modsecurity
+        rule_id:
+          type: string
+          example: "1005440"
+        rule:
+          type: string
+          description: The actual SecRule; its @rx pattern + id/status are applied.
+        action:
+          type: string
+          example: deny
+
+    TestBasisSpec:
+      type: object
+      required: [kind, proof_basis, expected]
+      properties:
+        kind:
+          type: string
+          example: http-request-attack
+        proof_basis:
+          type: string
+          enum: [verified-vuln-artifact, mitigation-discriminator]
+        request:
+          $ref: "#/components/schemas/TestRequest"
+        expected:
+          $ref: "#/components/schemas/TestExpected"
+
+    TestRequest:
+      type: object
+      properties:
+        method:
+          type: string
+          example: GET
+        path:
+          type: string
+          example: /
+        headers:
+          type: object
+          additionalProperties:
+            type: string
+        body:
+          type: string
+
+    TestExpected:
+      type: object
+      properties:
+        classification:
+          type: string
+          example: true-positive
+        blocked:
+          type: boolean
+        status_code:
+          type: integer
+          example: 403
+
+    RunOutcome:
+      type: object
+      description: >
+        Result envelope (capability .. evidence_refs) with the full verdict detail
+        appended (match .. limitations).
+      required: [capability, contract_id, request_id, correlation_id, run_id, result_id, terminal_state, status, result_ref, evidence_refs, request_sha256, match, expected, actual, prose_summary, content_sha256, size_bytes, created_at]
+      properties:
+        capability:
+          type: string
+          enum: ["mitigation-check"]
+        contract_id:
+          type: string
+          enum: ["mitigation-check@1.0"]
+        request_id:
+          type: string
+        run_id:
+          type: string
+        result_id:
+          type: string
+        terminal_state:
+          type: string
+          enum: [blocked, not-blocked, could-not-test, scope-declined, malfunction]
+          description: The test result.
+        status:
+          type: string
+          enum: [completed, failed]
+          description: >
+            Lifecycle status. Canonical asynchronous completion is reported only
+            after immutable Databricks publication succeeds.
+        correlation_id:
+          type: string
+          description: Echoed from the request; omitted when not supplied.
+        result_ref:
+          $ref: "#/components/schemas/ResultRef"
+        evidence_refs:
+          type: array
+          items:
+            type: string
+        request_sha256:
+          type: string
+          pattern: "^sha256:[0-9a-f]{64}$"
+          description: SHA-256 of the normalized request bound to the idempotency key.
+        upstream_inputs:
+          type: array
+          description: Exact authoritative upstream result identities used for this check.
+          items:
+            $ref: "#/components/schemas/UpstreamInput"
+        input_provenance:
+          type: object
+          additionalProperties: false
+          required: [route_policy, defense_result, check_result, verification]
+          properties:
+            route_policy: { type: string, enum: [registered-waf-route-v1, shared-attack-contracts-v2] }
+            defense_result: { $ref: "#/components/schemas/ImmutableResultLocator" }
+            check_result: { $ref: "#/components/schemas/ImmutableResultLocator" }
+            selected_test_basis_id: { type: string }
+            verification: { type: string, enum: [physical-and-logical-sha256-verified] }
+        profile_id:
+          type: string
+          enum: [waf-standard@1, waf-standard@2]
+          description: Present only for shared-contract v2 results.
+        obligation_results:
+          type: array
+          description: One entry for every required CG obligation, with one case for every exact required_input_ref.
+          items:
+            $ref: "#/components/schemas/ObligationResult"
+        accounting:
+          $ref: "#/components/schemas/CoverageAccounting"
+        application_unit:
+          $ref: "#/components/schemas/AppliedApplicationUnit"
+        match:
+          type: boolean
+          description: Whether actual.blocked equals expected.blocked.
+        expected:
+          $ref: "#/components/schemas/Outcome"
+        actual:
+          $ref: "#/components/schemas/ActualOutcome"
+        substrate:
+          $ref: "#/components/schemas/SubstrateInfo"
+        candidate:
+          allOf:
+            - $ref: "#/components/schemas/CandidateSpec"
+          description: >
+            The actual mitigation rule that was run (embedded so a mitigation_check
+            row is self-contained; consumers need not query the upstream table).
+        test_basis:
+          allOf:
+            - $ref: "#/components/schemas/TestBasisSpec"
+          description: The actual test that was run (embedded, same rationale).
+        steps:
+          type: array
+          items:
+            type: string
+        prose_summary:
+          type: string
+        limitations:
+          type: array
+          items:
+            type: string
+        content_sha256:
+          type: string
+          pattern: "^sha256:[0-9a-f]{64}$"
+        size_bytes:
+          type: integer
+          minimum: 1
+        created_at:
+          type: string
+          format: date-time
+
+    ResultRef:
+      type: object
+      description: >
+        Pointer to where the full result row is stored so another service can
+        query it.
+      required: [system, catalog, schema, table, key]
+      properties:
+        system:
+          type: string
+          example: databricks
+        catalog:
+          type: string
+        schema:
+          type: string
+        table:
+          type: string
+          example: mitigation_check
+        key:
+          type: string
+          description: >
+            The result_id value itself — the same string in the top-level result_id
+            and in the table's result_id column. Query WHERE result_id = <key>.
+          example: "mitigation-check-result:1c40b2497a6f766452572f2c"
+
+    Outcome:
+      type: object
+      properties:
+        classification:
+          type: string
+        blocked:
+          type: boolean
+        status_code:
+          type: integer
+
+    ObligationResult:
+      type: object
+      required: [obligation_id, case_results]
+      properties:
+        obligation_id: { type: string, minLength: 1 }
+        case_results:
+          type: array
+          minItems: 1
+          items:
+            $ref: "#/components/schemas/ObligationCaseResult"
+
+    ObligationCaseResult:
+      type: object
+      required: [input_id, disposition]
+      properties:
+        input_id: { type: string, minLength: 1 }
+        disposition:
+          type: string
+          enum: [blocked, not-blocked, safety-stop, unsupported]
+        resolution:
+          $ref: "#/components/schemas/HttpRequestTemplateResolution"
+        evidence:
+          type: object
+          properties:
+            blocked: { type: boolean }
+            status_code: { type: integer }
+            reached_app: { type: boolean }
+            matched_rule_id: { type: string }
+            detail: { type: string }
+
+    HttpRequestTemplateResolution:
+      type: object
+      required: [template_id, path_key, resolver_id, profile_id, resolver_profile_digest, rendered_request]
+      properties:
+        template_id: { type: string, minLength: 1 }
+        path_key: { type: string, minLength: 1 }
+        resolver_id: { type: string, enum: [mc-approved-route-adapter] }
+        profile_id: { type: string, enum: [waf-standard@1, waf-standard@2] }
+        resolver_profile_digest: { type: string, pattern: "^sha256:[0-9a-f]{64}$" }
+        rendered_request:
+          $ref: "#/components/schemas/SharedHttpRequest"
+
+    SharedHttpRequest:
+      type: object
+      required: [modality, method, scheme, authority, path, query, headers, cookies, body]
+      properties:
+        modality: { type: string, enum: [http-request] }
+        method: { type: string }
+        scheme: { type: string, enum: [http, https] }
+        authority: { type: string, minLength: 1 }
+        path: { type: string, pattern: "^/" }
+        query: { type: array, items: { $ref: "#/components/schemas/SharedHttpField" } }
+        headers: { type: array, items: { $ref: "#/components/schemas/SharedHttpField" } }
+        cookies: { type: array, items: { $ref: "#/components/schemas/SharedHttpField" } }
+        body: { type: object, additionalProperties: true }
+
+    SharedHttpField:
+      type: object
+      required: [name, value]
+      properties:
+        name: { type: string, minLength: 1 }
+        value: { type: string }
+
+    CoverageAccounting:
+      type: object
+      required: [required_obligation_count, accounted_obligation_count, unaccounted_required_obligation_count, source_member_count, represented_source_member_count, unsupported_source_member_count, unaccounted_source_member_count, required_work_item_count, disposed_work_item_count, unaccounted_required_work_item_count]
+      properties:
+        required_obligation_count: { type: integer, minimum: 0 }
+        accounted_obligation_count: { type: integer, minimum: 0 }
+        unaccounted_required_obligation_count: { type: integer, minimum: 0 }
+        source_member_count: { type: integer, minimum: 0 }
+        represented_source_member_count: { type: integer, minimum: 0 }
+        unsupported_source_member_count: { type: integer, minimum: 0 }
+        unaccounted_source_member_count: { type: integer, minimum: 0 }
+        required_work_item_count: { type: integer, minimum: 0 }
+        disposed_work_item_count: { type: integer, minimum: 0 }
+        unaccounted_required_work_item_count: { type: integer, minimum: 0 }
+
+    AppliedApplicationUnit:
+      type: object
+      required: [application_unit_id, artifact_ids, readback_verified]
+      properties:
+        application_unit_id: { type: string, minLength: 1 }
+        artifact_ids: { type: array, minItems: 1, items: { type: string } }
+        readback_verified: { type: boolean, enum: [true] }
+
+    ActualOutcome:
+      type: object
+      properties:
+        blocked:
+          type: boolean
+        status_code:
+          type: integer
+        reached_app:
+          type: boolean
+        matched_rule_id:
+          type: string
+        detail:
+          type: string
+
+    SubstrateInfo:
+      type: object
+      properties:
+        image:
+          type: string
+        runner:
+          type: string
+          enum: [local, inmemory, firewall, aci, aci-sp, github, github-ghcr]
+        container_id:
+          type: string
+        host_port:
+          type: integer
+        fqdn:
+          type: string
+          description: ACI public FQDN (aci runner only).
+        ready:
+          type: boolean
+
+    RunSummary:
+      type: object
+      properties:
+        run_id:
+          type: string
+        result_id:
+          type: string
+        terminal_state:
+          type: string
+        match:
+          type: boolean
+        created_at:
+          type: string
+          format: date-time
+        summary:
+          type: string
+
+    RunRecord:
+      type: object
+      properties:
+        run_id:
+          type: string
+        result_id:
+          type: string
+        terminal_state:
+          type: string
+        match:
+          type: boolean
+        created_at:
+          type: string
+          format: date-time
+        request:
+          $ref: "#/components/schemas/SubmitMitigationCheckRequest"
+        response:
+          $ref: "#/components/schemas/RunOutcome"
+
+    ErrorEnvelope:
+      type: object
+      required: [code, detail, retryable]
+      properties:
+        code:
+          type: string
+          example: invalid_request
+        detail:
+          type: string
+        retryable:
+          type: boolean
