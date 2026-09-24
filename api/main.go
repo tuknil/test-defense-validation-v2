@@ -34,9 +34,11 @@ const (
 	compatRunsPath = "/v1/compat/defense-validation-runs"
 )
 
-// upstreamContractID is the contract of the incoming defense-generation payload
-// that now carries the mitigation rule (primary_candidate.artifact_content).
-const upstreamContractID = "defense-generation@1.0"
+// upstreamContractID is the contract an inbound upstream payload carries. It is
+// this capability's own contract: a producer's result is referenced by
+// upstream_inputs rather than submitted as the request body, so the request is a
+// defense-validation request whatever it points at.
+const upstreamContractID = "defense-validation@1.0"
 
 //go:embed openapi.yaml
 var openapiSpec []byte

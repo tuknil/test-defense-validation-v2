@@ -23,8 +23,17 @@ func TestCanonicalValidationDoesNotDependOnUpstreamMode(t *testing.T) {
 			t.Fatalf("upstream=%t fields=%v", enabled, fields)
 		}
 	}
+	// An upstream submission carries this capability's own contract: the producer
+	// result is referenced by upstream_inputs, not submitted as the body.
+	upstream := validLifecycleRequest("request-upstream-contract")
+	upstream.ContractID = upstreamContractID
+	if fields := validate(upstream); len(fields) != 0 {
+		t.Fatalf("upstream contract rejected: %v", fields)
+	}
+
+	// A producer's own contract id is still not this capability's contract.
 	req := validLifecycleRequest("request-noncanonical")
-	req.ContractID = upstreamContractID
+	req.ContractID = "defense-generation@1.0"
 	if fields := validate(req); !hasField(fields, "contract_id") {
 		t.Fatalf("noncanonical contract accepted: %v", fields)
 	}
