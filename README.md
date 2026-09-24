@@ -208,10 +208,43 @@ DATABRICKS_DSN=token:<PAT>@<host>/sql/1.0/warehouses/<id>
 DATABRICKS_CATALOG=...
 DATABRICKS_SCHEMA=...
 DATABRICKS_TABLE=defense_validation
+DATABRICKS_RULE_TABLE=defense_validation_rules
 ```
 
 Target table:
 `defense_validation(run_id string, result_id string, result_json STRING, primary key(run_id, result_id))`.
+
+**Rule sink.** The resolved rule is additionally written to its own table, so it is
+queryable directly rather than only as a field inside a result blob — this is the
+row a push integration reads:
+
+```sql
+create table defense_validation_rules(
+  run_id string, result_id string, candidate_id string,
+  kind string, engine string, action string,
+  rule string, rule_sha256 string, source string, created_at timestamp,
+  constraint rule_pk primary key(result_id)) using delta
+```
+
+The write is an insert-only idempotent `MERGE` keyed by `result_id`, so a retried
+run rewrites the same row and a rule already handed off is never mutated. It is a
+hand-off, not a gate: a write failure does not invalidate an already-verified rule,
+so the run still reports it and records the failure in `limitations` rather than
+swallowing it.
+
+**Running without Databricks.** With `DATABRICKS_DSN` unset both sinks are
+disabled, the run still completes, and `result_ref` is a stand-in built from the
+configured destination and marked `"placeholder": true`:
+
+```json
+"result_ref": { "system": "databricks", "catalog": "…", "schema": "…",
+                "table": "defense_validation", "key": "defense-validation-result:…",
+                "placeholder": true }
+```
+
+Nothing was written at that address. The marker is the contract: a consumer must
+treat a placeholder reference as "this is where the row would go", never as a row
+it can read. `limitations` also records that the rule was not written.
 The host must be reachable from the API and the workspace's IP access list must
 allow it. A `403 "Unauthorized network access"` means the API's authorized route
 or workspace access configuration must be corrected.

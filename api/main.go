@@ -120,6 +120,10 @@ type APIError struct {
 var store *RunStore
 var dbx *DatabricksSink
 
+// ruleSink writes the resolved rule to its own Databricks table. nil when
+// Databricks is not configured.
+var ruleSink *DatabricksRuleSink
+
 // upstreamInputMode selects the separate upstream executor: the mitigation rule is
 // read from a Databricks table referenced by the request's upstream_inputs, instead
 // of the inline candidate. On by default; set env DV_INPUT_UPSTREAM=0 to disable.
@@ -143,6 +147,7 @@ func main() {
 
 	// Optional secondary sink (Databricks Delta). nil when DATABRICKS_DSN is unset.
 	dbx = NewDatabricksSink()
+	ruleSink = NewDatabricksRuleSink()
 
 	// Separate upstream executor (rule read from Databricks) — toggled by env, and
 	// ON by default; set DV_INPUT_UPSTREAM to 0/false/no to use the legacy executor.
@@ -193,6 +198,7 @@ func main() {
 	stopWorkers()
 	store.Close() // close the connection pool after in-flight requests drain
 	dbx.Close()
+	ruleSink.Close()
 	dbxReader.Close()
 	if err != nil && err != http.ErrServerClosed {
 		log.Fatal(err)
@@ -216,9 +222,13 @@ func enrichEnvelope(out *RunOutcome, correlationID string) {
 	} else {
 		out.Status = "completed"
 	}
-	out.ResultRef = nil
+	// An authoritative reference when the result sink is configured; otherwise a
+	// stand-in marked placeholder, so a result always says where its row belongs
+	// without ever claiming a row exists.
 	if dbx != nil {
 		out.ResultRef = dbx.ResultRef(out.ResultID)
+	} else {
+		out.ResultRef = placeholderResultRef(out.ResultID)
 	}
 }
 

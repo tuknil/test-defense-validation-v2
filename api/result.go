@@ -13,6 +13,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
+	"strings"
 	"time"
 )
 
@@ -73,6 +75,11 @@ type ResultRef struct {
 	Schema  string `json:"schema"`
 	Table   string `json:"table"`
 	Key     string `json:"key"`
+	// Placeholder marks a reference that names where the row WOULD live rather
+	// than a row known to exist. It is set only when no authoritative sink is
+	// configured, and it is carried in the JSON so a consumer can never mistake a
+	// stand-in for a published result.
+	Placeholder bool `json:"placeholder,omitempty"`
 }
 
 // resultIDPrefix is the prefix on the run's result_id (so result_id looks like
@@ -91,6 +98,20 @@ const (
 	// stateMalfunction is reserved for an internal fault, not a bad input.
 	stateMalfunction = "malfunction"
 )
+
+// placeholderResultRef builds a stand-in reference from the same environment the
+// real sinks read, for running without Databricks configured. It is always marked
+// Placeholder: nothing has been written at this address.
+func placeholderResultRef(resultID string) *ResultRef {
+	return &ResultRef{
+		System:      "databricks",
+		Catalog:     firstNonEmpty(strings.TrimSpace(os.Getenv("DATABRICKS_CATALOG")), "unset-catalog"),
+		Schema:      firstNonEmpty(strings.TrimSpace(os.Getenv("DATABRICKS_SCHEMA")), "defense_validation"),
+		Table:       firstNonEmpty(strings.TrimSpace(os.Getenv("DATABRICKS_TABLE")), "defense_validation"),
+		Key:         resultID,
+		Placeholder: true,
+	}
+}
 
 // resolutionFailed marks a run that could not produce a rule. It is the single
 // sink for every resolution error, so a failure is never reported as a success.

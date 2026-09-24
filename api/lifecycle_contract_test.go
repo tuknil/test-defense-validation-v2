@@ -85,14 +85,60 @@ func TestAsyncSubmitRejectsBodyCallbackBeforePersistence(t *testing.T) {
 	}
 }
 
-func TestEnrichEnvelopeDoesNotFabricateResultReference(t *testing.T) {
+// TestEnrichEnvelopeMarksAnUnpublishedResultReference covers the stand-in
+// reference used when no authoritative sink is configured. A reference is always
+// present so a result says where its row belongs, but an unpublished one must
+// carry placeholder:true — a consumer must never be told a row exists when none
+// was written.
+func TestEnrichEnvelopeMarksAnUnpublishedResultReference(t *testing.T) {
 	previous := dbx
 	dbx = nil
 	t.Cleanup(func() { dbx = previous })
+	t.Setenv("DATABRICKS_CATALOG", "test_catalog")
+	t.Setenv("DATABRICKS_SCHEMA", "test_schema")
+	t.Setenv("DATABRICKS_TABLE", "test_results")
+
 	outcome := RunOutcome{ResultID: resultIDPrefix + "one", TerminalState: stateRuleResolved}
 	enrichEnvelope(&outcome, "correlation-1")
-	if outcome.ResultRef != nil {
-		t.Fatalf("fabricated result reference: %+v", outcome.ResultRef)
+
+	ref := outcome.ResultRef
+	if ref == nil {
+		t.Fatal("a result should always name where its row belongs")
+	}
+	if !ref.Placeholder {
+		t.Fatal("an unpublished reference must be marked placeholder, not passed off as authoritative")
+	}
+	if ref.Catalog != "test_catalog" || ref.Schema != "test_schema" || ref.Table != "test_results" {
+		t.Errorf("placeholder should be built from the configured destination: %+v", ref)
+	}
+	if ref.Key != outcome.ResultID {
+		t.Errorf("key = %q, want the result_id %q", ref.Key, outcome.ResultID)
+	}
+
+	// The marker has to survive serialization, since that is how a consumer sees it.
+	encoded, err := json.Marshal(ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(encoded), `"placeholder":true`) {
+		t.Errorf("placeholder marker missing from the wire form: %s", encoded)
+	}
+}
+
+// TestResultRefFromAConfiguredSinkIsNotMarkedPlaceholder is the other half: a real
+// publication destination must not be tainted with the stand-in marker.
+func TestResultRefFromAConfiguredSinkIsNotMarkedPlaceholder(t *testing.T) {
+	sink := &DatabricksSink{catalog: "c", schema: "s", name: "t"}
+	ref := sink.ResultRef("defense-validation-result:one")
+	if ref == nil || ref.Placeholder {
+		t.Fatalf("authoritative reference = %+v", ref)
+	}
+	encoded, err := json.Marshal(ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), "placeholder") {
+		t.Errorf("authoritative reference must omit the marker entirely: %s", encoded)
 	}
 }
 

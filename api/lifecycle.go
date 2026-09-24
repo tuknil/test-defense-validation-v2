@@ -320,6 +320,10 @@ func executeDurableRun(ctx context.Context, run DurableRun) (RunOutcome, error) 
 }
 
 func resolveRequestedRule(ctx context.Context, req SubmitDefenseValidationRequest, runID, resultID string) RunOutcome {
+	return persistResolvedRule(ctx, resolveRequestedRuleInput(ctx, req, runID, resultID))
+}
+
+func resolveRequestedRuleInput(ctx context.Context, req SubmitDefenseValidationRequest, runID, resultID string) RunOutcome {
 	if v2LocatorMode(req) {
 		return executeSharedContractV2(ctx, req, runID, resultID)
 	}
@@ -330,6 +334,32 @@ func resolveRequestedRule(ctx context.Context, req SubmitDefenseValidationReques
 		return executeScenarioUpstream(ctx, req, runID, resultID)
 	}
 	return reportInlineCandidate(req, runID, resultID)
+}
+
+// persistResolvedRule writes the rule to its own Databricks table. The rule is
+// already resolved and verified at this point, so a write failure does not
+// invalidate it: the run still reports the rule, and the failure is recorded on
+// the result rather than swallowed, because a silent miss here would leave the
+// push integration with nothing to read and no sign that anything was wrong.
+func persistResolvedRule(ctx context.Context, out RunOutcome) RunOutcome {
+	if out.TerminalState != stateRuleResolved || out.Candidate == nil {
+		return out
+	}
+	if ruleSink == nil {
+		out.Limitations = append(out.Limitations,
+			"The rule was not written to Databricks: no rule sink is configured (DATABRICKS_DSN/DATABRICKS_CATALOG).")
+		return out
+	}
+	if err := ruleSink.WriteRule(ctx, out); err != nil {
+		log.Printf("rule_write_failed run_id=%q result_id=%q error=%q", out.RunID, out.ResultID, err.Error())
+		out.Limitations = append(out.Limitations, "The rule was reported but could not be written to Databricks: "+err.Error())
+		return out
+	}
+	if ref := ruleSink.RuleRef(out.ResultID); ref != nil {
+		out.Steps = append(out.Steps, fmt.Sprintf("wrote rule to Databricks `%s`.`%s`.`%s` where result_id=%s",
+			ref.Catalog, ref.Schema, ref.Table, ref.Key))
+	}
+	return out
 }
 
 func setCanonicalIntegrity(out *RunOutcome) error {

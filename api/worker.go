@@ -221,6 +221,19 @@ func (w *RunWorker) executeOne(parent context.Context, run DurableRun) {
 			return
 		}
 	}
+	// A placeholder reference means no authoritative sink is configured. The run
+	// completes on the staged bytes alone so the service is usable without
+	// Databricks; the reference carries placeholder:true, so a consumer is told
+	// plainly that no row was published. A configured sink never takes this path.
+	if outcome.ResultRef != nil && outcome.ResultRef.Placeholder {
+		written, transitionErr := w.store.CompletePublished(parent, run.RunID, w.workerID, run.LeaseToken, outcome, payload)
+		logLifecycle("run_completed_without_publication", run, map[string]any{
+			"reason":                 "no authoritative Databricks result sink is configured",
+			"result_ref_placeholder": true,
+			"transition_written":     written, "transition_error": errorString(transitionErr),
+		})
+		return
+	}
 	if w.publisher == nil || outcome.ResultRef == nil {
 		if run.PublicationPending {
 			w.retryVerification(parent, run, fmt.Errorf("authoritative Databricks result verifier is unavailable"))

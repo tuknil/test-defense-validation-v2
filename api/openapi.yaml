@@ -608,7 +608,8 @@ components:
       type: object
       description: >
         Pointer to where the full result row is stored so another service can
-        query it.
+        query it. When `placeholder` is true nothing has been written at this
+        address: it names where the row would go, and must not be read as a row.
       required: [system, catalog, schema, table, key]
       properties:
         system:
@@ -627,6 +628,12 @@ components:
             The result_id value itself — the same string in the top-level result_id
             and in the table's result_id column. Query WHERE result_id = <key>.
           example: "defense-validation-result:1c40b2497a6f766452572f2c"
+        placeholder:
+          type: boolean
+          description: >
+            Present and true only when no authoritative sink was configured, so no
+            row was written. Absent on a published result. A consumer must never
+            query a placeholder reference expecting a row.
 
     AppliedApplicationUnit:
       type: object
