@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -11,7 +12,7 @@ import (
 // result whose primary_candidate has no artifact_content, only an artifact_id
 // pointing into the artifacts map.
 func TestReadCandidateAcceptsAControlTranslationResultJSON(t *testing.T) {
-	pc, err := primaryCandidateFromResultJSON(controlTranslationFixture(t))
+	pc, _, err := primaryCandidateFromResultJSON(controlTranslationFixture(t))
 	if err != nil {
 		t.Fatalf("resolve control-translation candidate: %v", err)
 	}
@@ -43,7 +44,7 @@ func TestReadCandidateAcceptsAControlTranslationResultJSON(t *testing.T) {
 // TestControlTranslationCandidateClassification pins how the resolved candidate
 // is classified before it reaches the evaluator.
 func TestControlTranslationCandidateClassification(t *testing.T) {
-	pc, err := primaryCandidateFromResultJSON(controlTranslationFixture(t))
+	pc, _, err := primaryCandidateFromResultJSON(controlTranslationFixture(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -58,15 +59,16 @@ func TestControlTranslationCandidateClassification(t *testing.T) {
 	}
 }
 
-// TestAkamaiRuleSetIsNotExecutableByTheModSecurityEvaluator documents the limit
-// of this wiring: reading and verifying the translated rule succeeds, but the
-// in-repo WAF evaluator only compiles ModSecurity SecRules. An Akamai rule set
-// therefore fails to compile, which must surface as a could-not-test rather than
-// as a pass or a block.
-func TestAkamaiRuleSetIsNotExecutableByTheModSecurityEvaluator(t *testing.T) {
-	pc, err := primaryCandidateFromResultJSON(controlTranslationFixture(t))
+// TestReportCustomWAFRulePrintsTheRuleAndClaimsNoVerdict covers the
+// control-translation short circuit: the already-translated rule is printed and
+// the run ends there, with no test basis derived and nothing compiled.
+func TestReportCustomWAFRulePrintsTheRuleAndClaimsNoVerdict(t *testing.T) {
+	pc, capability, err := primaryCandidateFromResultJSON(controlTranslationFixture(t))
 	if err != nil {
 		t.Fatal(err)
+	}
+	if capability != capControlTranslation {
+		t.Fatalf("resolved capability = %q, want %q", capability, capControlTranslation)
 	}
 	rule := strings.TrimSpace(pc.ArtifactContent)
 	cand := CandidateSpec{
@@ -75,9 +77,38 @@ func TestAkamaiRuleSetIsNotExecutableByTheModSecurityEvaluator(t *testing.T) {
 		Rule:   rule,
 		Action: deriveRuleAction(rule),
 	}
-	if _, err := compileRule(cand); err == nil {
-		t.Fatal("compileRule unexpectedly accepted an Akamai rule set — " +
-			"if an Akamai evaluator was added, update this test")
+	ref := upstreamRef{Catalog: "cat", Schema: "control_translation", Table: "control_translation_results",
+		Key: "control-translation-result:e0b7e5cf"}
+
+	var printed bytes.Buffer
+	out := reportCustomWAFRule(RunOutcome{RunID: "dv-run-1", ResultID: "r"}, cand, ref, &printed)
+
+	// The rule is printed, decoded and indented.
+	text := printed.String()
+	if !strings.Contains(text, `"configurationType": "akamai-custom-rule-set"`) {
+		t.Error("the rule set was not printed in decoded, indented form")
+	}
+	if !strings.Contains(text, ref.Key) {
+		t.Error("printed output should name the row it was read from")
+	}
+
+	// No verdict is claimed, because nothing was executed.
+	if out.TerminalState != stateCouldNotTest {
+		t.Errorf("terminal_state = %q, want %q", out.TerminalState, stateCouldNotTest)
+	}
+	if out.Match || out.Actual.Blocked {
+		t.Error("no traffic was run, so match/blocked must stay false")
+	}
+	if len(out.Limitations) == 0 {
+		t.Error("the outcome must record that nothing was executed")
+	}
+
+	// The rule itself is carried on the outcome, and no test basis was derived.
+	if out.Candidate == nil || out.Candidate.Rule != rule {
+		t.Error("the reported rule must be carried on the outcome")
+	}
+	if out.TestBasis != nil {
+		t.Error("no test basis should be derived for an already-translated rule")
 	}
 }
 
@@ -91,7 +122,7 @@ func TestPrimaryCandidateFromResultJSONKeepsTheInlineDefenseGenerationShape(t *t
 			"artifact_type":"modsecurity-rule",
 			"candidate_id":"cand-1",
 			"selected_control_class":"waf"}}`)
-	pc, err := primaryCandidateFromResultJSON(js)
+	pc, _, err := primaryCandidateFromResultJSON(js)
 	if err != nil {
 		t.Fatalf("inline shape: %v", err)
 	}
@@ -122,7 +153,7 @@ func TestPrimaryCandidateFromResultJSONRejectsUnusableRows(t *testing.T) {
 			"translation did not complete"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := primaryCandidateFromResultJSON([]byte(tc.js))
+			_, _, err := primaryCandidateFromResultJSON([]byte(tc.js))
 			if err == nil {
 				t.Fatal("expected an error")
 			}

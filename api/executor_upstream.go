@@ -10,7 +10,9 @@ package main
 //   - "control-translation": the fallback rule source when there is no
 //     defense-generation entry. Its primary_candidate holds no content; the rule
 //     is the artifacts-map entry named by artifact_id, resolved and hash-verified
-//     by ExtractCustomWAFRule (see control_translation.go);
+//     by ExtractCustomWAFRule (see control_translation.go). That rule is already a
+//     vendor-specific custom WAF artifact, so the run reports it and stops — no
+//     test basis, no evaluator (see reportCustomWAFRule);
 //   - "check-generation": the test is derived from result_json.run_result via the
 //     standalone stimulus converter (parseStimulus -> TestBasisFromStimulus).
 //
@@ -24,6 +26,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"regexp"
@@ -93,7 +96,7 @@ func executeScenarioUpstream(ctx context.Context, req SubmitDefenseValidationReq
 		return couldNotTest(base,
 			"no defense-generation or control-translation entry in upstream_inputs (need the rule)")
 	}
-	pc, err := dbxReader.ReadCandidate(ctx, ruleEntry.ResultRef)
+	pc, sourceCapability, err := dbxReader.ReadCandidate(ctx, ruleEntry.ResultRef)
 	if err != nil {
 		return couldNotTest(base, "could not read rule from Databricks "+ruleEntry.ResultRef.qualified()+
 			" where result_id="+ruleEntry.ResultRef.Key+": "+err.Error())
@@ -111,6 +114,14 @@ func executeScenarioUpstream(ctx context.Context, req SubmitDefenseValidationReq
 	logLifecycle("upstream_candidate_resolved", lifecycleIdentity(req, runID, resultID), map[string]any{
 		"candidate_kind": cand.Kind, "candidate_engine": cand.Engine, "candidate_action": cand.Action, "candidate_id": pc.CandidateID,
 	})
+
+	// A control-translation rule is already a vendor-specific custom WAF artifact,
+	// not a rule this service compiles and exercises. Report it and return: no test
+	// basis is derived and the evaluator is never reached.
+	if sourceCapability == capControlTranslation {
+		return reportCustomWAFRule(base, cand, ruleEntry.ResultRef, os.Stdout)
+	}
+
 	// A firewall candidate runs on the separate firewall evaluator, not the WAF path.
 	if cand.Kind == "firewall-rule" && req.ExecutionMode != execFirewall {
 		req.ExecutionMode = execFirewall
@@ -148,6 +159,29 @@ func executeScenarioUpstream(ctx context.Context, req SubmitDefenseValidationReq
 
 	out := executeScenario(ctx, req, runID, resultID)
 	out.Steps = append(steps, out.Steps...)
+	return out
+}
+
+// reportCustomWAFRule writes an already-translated vendor rule to w and returns
+// the run outcome for it. Nothing is executed, so no block/pass verdict is
+// claimed: the terminal state stays could-not-test and the rule itself is carried
+// on the outcome so the canonical result still records exactly what was read.
+func reportCustomWAFRule(out RunOutcome, cand CandidateSpec, ref upstreamRef, w io.Writer) RunOutcome {
+	rule := CustomWAFRule{Content: []byte(cand.Rule)}
+	fmt.Fprintf(w, "custom WAF rule (%s / %s) read from %s where result_id=%s:\n%s\n",
+		cand.Kind, cand.Engine, ref.qualified(), ref.Key, rule.Pretty())
+
+	out.Candidate = &cand
+	out.Steps = append(out.Steps, fmt.Sprintf(
+		"read already-translated %s (%s) from Databricks %s where result_id=%s",
+		cand.Kind, cand.Engine, ref.qualified(), ref.Key))
+	out.ProseSummary = fmt.Sprintf(
+		"Reported the translated %s custom WAF rule; it was not executed, so no block/pass verdict is claimed.",
+		cand.Engine)
+	out.TerminalState = stateCouldNotTest
+	out.Actual.Detail = "candidate is an already-translated custom WAF rule; reported without execution"
+	out.Limitations = append(out.Limitations,
+		"No attack or benign traffic was run: this service does not execute "+cand.Engine+" rules.")
 	return out
 }
 
@@ -278,11 +312,13 @@ func NewDatabricksReader() *DatabricksReader {
 }
 
 // ReadCandidate reads result_json for ref.Key from the referenced table and
-// returns the rule to apply as a PrimaryCandidate. The row may hold either
-// producer shape; see primaryCandidateFromResultJSON.
-func (r *DatabricksReader) ReadCandidate(ctx context.Context, ref upstreamRef) (PrimaryCandidate, error) {
+// returns the rule to apply as a PrimaryCandidate, along with the capability of
+// the result it was resolved from. The row may hold either producer shape; see
+// primaryCandidateFromResultJSON. The caller needs the capability because an
+// already-translated vendor rule is reported rather than executed.
+func (r *DatabricksReader) ReadCandidate(ctx context.Context, ref upstreamRef) (PrimaryCandidate, string, error) {
 	if r == nil || r.db == nil {
-		return PrimaryCandidate{}, fmt.Errorf("reader not configured")
+		return PrimaryCandidate{}, "", fmt.Errorf("reader not configured")
 	}
 	q := "SELECT result_json FROM " + ref.qualified() + " WHERE result_id = ? LIMIT 1"
 	c, cancel := context.WithTimeout(ctx, 60*time.Second)
@@ -293,16 +329,16 @@ func (r *DatabricksReader) ReadCandidate(ctx context.Context, ref upstreamRef) (
 	if err := r.db.QueryRowContext(c, q, ref.Key).Scan(&js); err != nil {
 		log.Printf("databricks reader: READ FAILED (result_id=%s) after %s: %v",
 			ref.Key, time.Since(start).Round(time.Millisecond), err)
-		return PrimaryCandidate{}, err
+		return PrimaryCandidate{}, "", err
 	}
 
-	pc, err := primaryCandidateFromResultJSON([]byte(js))
+	pc, capability, err := primaryCandidateFromResultJSON([]byte(js))
 	if err != nil {
-		return PrimaryCandidate{}, err
+		return PrimaryCandidate{}, "", err
 	}
 	log.Printf("databricks reader: READ OK (result_id=%s) in %s",
 		ref.Key, time.Since(start).Round(time.Millisecond))
-	return pc, nil
+	return pc, capability, nil
 }
 
 // primaryCandidateFromResultJSON adapts a producer's result_json to the
@@ -316,42 +352,44 @@ func (r *DatabricksReader) ReadCandidate(ctx context.Context, ref upstreamRef) (
 //     it and verifies content_hash, so a tampered or swapped artifact is refused
 //     here rather than applied.
 //
-// Dispatch is by capability, which both producers set. A row with neither the
-// inline content nor a resolvable artifact is an error, never a silent empty rule.
-func primaryCandidateFromResultJSON(js []byte) (PrimaryCandidate, error) {
+// Dispatch is by capability, which both producers set, and that capability is
+// returned so the caller can tell an already-translated vendor rule from a
+// compilable one. A row with neither the inline content nor a resolvable artifact
+// is an error, never a silent empty rule.
+func primaryCandidateFromResultJSON(js []byte) (PrimaryCandidate, string, error) {
 	var probe struct {
 		Capability string `json:"capability"`
 	}
 	if err := json.Unmarshal(js, &probe); err != nil {
-		return PrimaryCandidate{}, fmt.Errorf("result_json parse: %w", err)
+		return PrimaryCandidate{}, "", fmt.Errorf("result_json parse: %w", err)
 	}
 
 	if probe.Capability == capControlTranslation {
 		rule, err := ExtractCustomWAFRule(js)
 		if err != nil {
-			return PrimaryCandidate{}, fmt.Errorf("control-translation result: %w", err)
+			return PrimaryCandidate{}, probe.Capability, fmt.Errorf("control-translation result: %w", err)
 		}
 		// The vendor rule set becomes the candidate content. target_control_class
-		// feeds candidateKind, and artifact_type feeds candidateEngine, so both are
-		// carried across rather than re-derived from the rule text.
+		// feeds candidateKind and artifact_type feeds candidateEngine, so both come
+		// from producer metadata rather than being re-derived from the rule text.
 		return PrimaryCandidate{
 			ArtifactContent:      string(rule.Content),
 			ArtifactType:         rule.ArtifactType,
 			CandidateID:          rule.CandidateID,
 			SelectedControlClass: rule.ControlClass,
-		}, nil
+		}, probe.Capability, nil
 	}
 
 	var res struct {
 		PrimaryCandidate PrimaryCandidate `json:"primary_candidate"`
 	}
 	if err := json.Unmarshal(js, &res); err != nil {
-		return PrimaryCandidate{}, fmt.Errorf("result_json parse: %w", err)
+		return PrimaryCandidate{}, probe.Capability, fmt.Errorf("result_json parse: %w", err)
 	}
 	if strings.TrimSpace(res.PrimaryCandidate.ArtifactContent) == "" {
-		return PrimaryCandidate{}, fmt.Errorf("primary_candidate.artifact_content is empty")
+		return PrimaryCandidate{}, probe.Capability, fmt.Errorf("primary_candidate.artifact_content is empty")
 	}
-	return res.PrimaryCandidate, nil
+	return res.PrimaryCandidate, probe.Capability, nil
 }
 
 // ReadRunResult reads result_json for ref.Key from the referenced table and returns
