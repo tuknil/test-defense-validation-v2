@@ -12,7 +12,7 @@ import (
 // result whose primary_candidate has no artifact_content, only an artifact_id
 // pointing into the artifacts map.
 func TestReadCandidateAcceptsAControlTranslationResultJSON(t *testing.T) {
-	pc, _, err := primaryCandidateFromResultJSON(controlTranslationFixture(t))
+	pc, err := primaryCandidateFromResultJSON(controlTranslationFixture(t))
 	if err != nil {
 		t.Fatalf("resolve control-translation candidate: %v", err)
 	}
@@ -44,7 +44,7 @@ func TestReadCandidateAcceptsAControlTranslationResultJSON(t *testing.T) {
 // TestControlTranslationCandidateClassification pins how the resolved candidate
 // is classified before it reaches the evaluator.
 func TestControlTranslationCandidateClassification(t *testing.T) {
-	pc, _, err := primaryCandidateFromResultJSON(controlTranslationFixture(t))
+	pc, err := primaryCandidateFromResultJSON(controlTranslationFixture(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -63,12 +63,9 @@ func TestControlTranslationCandidateClassification(t *testing.T) {
 // step: the resolved rule is printed and the run ends there, with no verdict of
 // any kind on the outcome.
 func TestReportResolvedRulePrintsTheRuleAndClaimsNoVerdict(t *testing.T) {
-	pc, capability, err := primaryCandidateFromResultJSON(controlTranslationFixture(t))
+	pc, err := primaryCandidateFromResultJSON(controlTranslationFixture(t))
 	if err != nil {
 		t.Fatal(err)
-	}
-	if capability != capControlTranslation {
-		t.Fatalf("resolved capability = %q, want %q", capability, capControlTranslation)
 	}
 	rule := strings.TrimSpace(pc.ArtifactContent)
 	cand := CandidateSpec{
@@ -132,9 +129,10 @@ func TestRunOutcomeCarriesNoVerdictFields(t *testing.T) {
 	}
 }
 
-// TestPrimaryCandidateFromResultJSONKeepsTheInlineDefenseGenerationShape ensures
-// the added control-translation branch did not disturb the existing path.
-func TestPrimaryCandidateFromResultJSONKeepsTheInlineDefenseGenerationShape(t *testing.T) {
+// TestPrimaryCandidateFromResultJSONRejectsOtherProducers pins that only a
+// control-translation result is read here. A defense-generation row carries its
+// rule somewhere else entirely, so accepting it would mean guessing.
+func TestPrimaryCandidateFromResultJSONRejectsOtherProducers(t *testing.T) {
 	js := []byte(`{
 		"capability":"defense-generation",
 		"primary_candidate":{
@@ -142,15 +140,12 @@ func TestPrimaryCandidateFromResultJSONKeepsTheInlineDefenseGenerationShape(t *t
 			"artifact_type":"modsecurity-rule",
 			"candidate_id":"cand-1",
 			"selected_control_class":"waf"}}`)
-	pc, _, err := primaryCandidateFromResultJSON(js)
-	if err != nil {
-		t.Fatalf("inline shape: %v", err)
+	_, err := primaryCandidateFromResultJSON(js)
+	if err == nil {
+		t.Fatal("a defense-generation result must not be accepted from upstream_inputs")
 	}
-	if !strings.HasPrefix(pc.ArtifactContent, "SecRule") {
-		t.Errorf("artifact_content = %q", pc.ArtifactContent)
-	}
-	if engine := candidateEngine(pc, pc.ArtifactContent); engine != "modsecurity" {
-		t.Errorf("candidateEngine = %q, want modsecurity", engine)
+	if !strings.Contains(err.Error(), "must reference a control-translation result") {
+		t.Errorf("error = %q", err)
 	}
 }
 
@@ -161,8 +156,8 @@ func TestPrimaryCandidateFromResultJSONRejectsUnusableRows(t *testing.T) {
 		want string
 	}{
 		{"malformed", `{`, "result_json parse"},
-		{"inline shape with no content", `{"capability":"defense-generation","primary_candidate":{}}`,
-			"artifact_content is empty"},
+		{"another producer", `{"capability":"defense-generation","primary_candidate":{}}`,
+			"must reference a control-translation result"},
 		{"control-translation with no artifacts", `{"capability":"control-translation","terminal_state":"translated",
 			"primary_candidate":{"artifact_id":"missing"}}`, "is not present in artifacts"},
 		{"control-translation that did not translate", `{"capability":"control-translation",
@@ -170,7 +165,7 @@ func TestPrimaryCandidateFromResultJSONRejectsUnusableRows(t *testing.T) {
 			"translation did not complete"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			_, _, err := primaryCandidateFromResultJSON([]byte(tc.js))
+			_, err := primaryCandidateFromResultJSON([]byte(tc.js))
 			if err == nil {
 				t.Fatal("expected an error")
 			}
@@ -181,19 +176,17 @@ func TestPrimaryCandidateFromResultJSONRejectsUnusableRows(t *testing.T) {
 	}
 }
 
-// TestRuleEntrySelectionFallsBackToControlTranslation pins the precedence:
-// defense-generation wins when present, control-translation is the fallback.
-func TestRuleEntrySelectionFallsBackToControlTranslation(t *testing.T) {
+// TestRuleEntrySelectionTakesOnlyControlTranslation pins that the upstream rule
+// entry is the control-translation one and nothing else: a defense-generation
+// entry alongside it is not a fallback and must not be selected.
+func TestRuleEntrySelectionTakesOnlyControlTranslation(t *testing.T) {
 	dg := upstreamInput{Capability: capDefenseGeneration, ResultRef: upstreamRef{Key: "dg-1"}}
 	ct := upstreamInput{Capability: capControlTranslation, ResultRef: upstreamRef{Key: "ct-1"}}
 
-	if got := selectByCapability([]upstreamInput{ct, dg}, capDefenseGeneration); got == nil || got.ResultRef.Key != "dg-1" {
-		t.Error("defense-generation must keep precedence when both entries are present")
+	if got := selectByCapability([]upstreamInput{dg, ct}, capControlTranslation); got == nil || got.ResultRef.Key != "ct-1" {
+		t.Error("the control-translation entry must be selected even when another entry precedes it")
 	}
-	if got := selectByCapability([]upstreamInput{ct}, capDefenseGeneration); got != nil {
-		t.Error("a control-translation entry must not satisfy the defense-generation lookup")
-	}
-	if got := selectByCapability([]upstreamInput{ct}, capControlTranslation); got == nil || got.ResultRef.Key != "ct-1" {
-		t.Error("control-translation entry must be selectable as the fallback")
+	if got := selectByCapability([]upstreamInput{dg}, capControlTranslation); got != nil {
+		t.Error("a defense-generation entry must not satisfy the control-translation lookup")
 	}
 }

@@ -2,13 +2,13 @@ package main
 
 // executor_upstream.go resolves the defensive control candidate named by the
 // request's upstream_inputs, whose result_refs point at Databricks rows, and
-// reports it. Entries are selected by capability:
-//   - "defense-generation": the rule is read inline from result_json
-//     (primary_candidate.artifact_content);
-//   - "control-translation": the fallback when there is no defense-generation
-//     entry. Its primary_candidate holds no content; the rule is the
-//     artifacts-map entry named by artifact_id, resolved and hash-verified by
-//     ExtractCustomWAFRule (see control_translation.go).
+// reports it.
+//
+// upstream_inputs carries exactly one kind of producer result here:
+// "control-translation". Its primary_candidate holds no content; the rule is the
+// artifacts-map entry named by artifact_id, resolved and hash-verified by
+// ExtractCustomWAFRule (see control_translation.go). Any other producer shape is
+// rejected rather than guessed at.
 //
 // Nothing is executed. The resolved rule is printed and carried on the result;
 // pushing it to a third-party control plane is the next stage, and any pass/fail
@@ -75,18 +75,11 @@ func executeScenarioUpstream(ctx context.Context, req SubmitDefenseValidationReq
 		return resolutionFailed(base, "Databricks reader not configured (DATABRICKS_DSN unset)")
 	}
 
-	// defense-generation keeps precedence so existing requests resolve to the same
-	// row as before; control-translation is the fallback because it carries the same
-	// rule after translation to a vendor syntax.
-	ruleEntry := selectByCapability(entries, capDefenseGeneration)
+	ruleEntry := selectByCapability(entries, capControlTranslation)
 	if ruleEntry == nil {
-		ruleEntry = selectByCapability(entries, capControlTranslation)
+		return resolutionFailed(base, "no control-translation entry in upstream_inputs (need the rule)")
 	}
-	if ruleEntry == nil {
-		return resolutionFailed(base,
-			"no defense-generation or control-translation entry in upstream_inputs (need the rule)")
-	}
-	pc, sourceCapability, err := dbxReader.ReadCandidate(ctx, ruleEntry.ResultRef)
+	pc, err := dbxReader.ReadCandidate(ctx, ruleEntry.ResultRef)
 	if err != nil {
 		return resolutionFailed(base, "could not read rule from Databricks "+ruleEntry.ResultRef.qualified()+
 			" where result_id="+ruleEntry.ResultRef.Key+": "+err.Error())
@@ -103,10 +96,10 @@ func executeScenarioUpstream(ctx context.Context, req SubmitDefenseValidationReq
 	}
 	logLifecycle("upstream_candidate_resolved", lifecycleIdentity(req, runID, resultID), map[string]any{
 		"candidate_kind": cand.Kind, "candidate_engine": cand.Engine, "candidate_action": cand.Action,
-		"candidate_id": pc.CandidateID, "source_capability": sourceCapability,
+		"candidate_id": pc.CandidateID, "source_capability": capControlTranslation,
 	})
 
-	return reportResolvedRule(base, cand, sourceCapability,
+	return reportResolvedRule(base, cand, capControlTranslation,
 		"Databricks "+ruleEntry.ResultRef.qualified()+" where result_id="+ruleEntry.ResultRef.Key, os.Stdout)
 }
 
@@ -237,13 +230,10 @@ func NewDatabricksReader() *DatabricksReader {
 }
 
 // ReadCandidate reads result_json for ref.Key from the referenced table and
-// returns the rule to apply as a PrimaryCandidate, along with the capability of
-// the result it was resolved from. The row may hold either producer shape; see
-// primaryCandidateFromResultJSON. The caller needs the capability because an
-// already-translated vendor rule is reported rather than executed.
-func (r *DatabricksReader) ReadCandidate(ctx context.Context, ref upstreamRef) (PrimaryCandidate, string, error) {
+// returns the rule it carries; see primaryCandidateFromResultJSON.
+func (r *DatabricksReader) ReadCandidate(ctx context.Context, ref upstreamRef) (PrimaryCandidate, error) {
 	if r == nil || r.db == nil {
-		return PrimaryCandidate{}, "", fmt.Errorf("reader not configured")
+		return PrimaryCandidate{}, fmt.Errorf("reader not configured")
 	}
 	q := "SELECT result_json FROM " + ref.qualified() + " WHERE result_id = ? LIMIT 1"
 	c, cancel := context.WithTimeout(ctx, 60*time.Second)
@@ -254,67 +244,55 @@ func (r *DatabricksReader) ReadCandidate(ctx context.Context, ref upstreamRef) (
 	if err := r.db.QueryRowContext(c, q, ref.Key).Scan(&js); err != nil {
 		log.Printf("databricks reader: READ FAILED (result_id=%s) after %s: %v",
 			ref.Key, time.Since(start).Round(time.Millisecond), err)
-		return PrimaryCandidate{}, "", err
+		return PrimaryCandidate{}, err
 	}
 
-	pc, capability, err := primaryCandidateFromResultJSON([]byte(js))
+	pc, err := primaryCandidateFromResultJSON([]byte(js))
 	if err != nil {
-		return PrimaryCandidate{}, "", err
+		return PrimaryCandidate{}, err
 	}
 	log.Printf("databricks reader: READ OK (result_id=%s) in %s",
 		ref.Key, time.Since(start).Round(time.Millisecond))
-	return pc, capability, nil
+	return pc, nil
 }
 
-// primaryCandidateFromResultJSON adapts a producer's result_json to the
-// PrimaryCandidate the upstream executor consumes. Two shapes occur:
+// primaryCandidateFromResultJSON adapts a control-translation result_json to the
+// PrimaryCandidate the upstream executor consumes.
 //
-//   - defense-generation: primary_candidate.artifact_content carries the rule
-//     inline (a ModSecurity SecRule).
-//   - control-translation: primary_candidate carries no content at all. Its
-//     artifact_id names an entry in the flat artifacts map, and that entry's
-//     content — a JSON string — is the vendor rule. ExtractCustomWAFRule resolves
-//     it and verifies content_hash, so a tampered or swapped artifact is refused
-//     here rather than applied.
+// A control-translation primary_candidate carries no content of its own: its
+// artifact_id names an entry in the flat artifacts map, and that entry's content —
+// a JSON string — is the vendor rule. ExtractCustomWAFRule resolves it and verifies
+// content_hash, so a tampered or swapped artifact is refused here rather than
+// reported.
 //
-// Dispatch is by capability, which both producers set, and that capability is
-// returned so the caller can tell an already-translated vendor rule from a
-// compilable one. A row with neither the inline content nor a resolvable artifact
-// is an error, never a silent empty rule.
-func primaryCandidateFromResultJSON(js []byte) (PrimaryCandidate, string, error) {
+// Any other capability is an error. Reading a different producer's result would
+// mean guessing at where its rule lives, and a wrong guess reports a rule that was
+// never verified.
+func primaryCandidateFromResultJSON(js []byte) (PrimaryCandidate, error) {
 	var probe struct {
 		Capability string `json:"capability"`
 	}
 	if err := json.Unmarshal(js, &probe); err != nil {
-		return PrimaryCandidate{}, "", fmt.Errorf("result_json parse: %w", err)
+		return PrimaryCandidate{}, fmt.Errorf("result_json parse: %w", err)
+	}
+	if probe.Capability != capControlTranslation {
+		return PrimaryCandidate{}, fmt.Errorf(
+			"upstream_inputs must reference a %s result, got %q", capControlTranslation, probe.Capability)
 	}
 
-	if probe.Capability == capControlTranslation {
-		rule, err := ExtractCustomWAFRule(js)
-		if err != nil {
-			return PrimaryCandidate{}, probe.Capability, fmt.Errorf("control-translation result: %w", err)
-		}
-		// The vendor rule set becomes the candidate content. target_control_class
-		// feeds candidateKind and artifact_type feeds candidateEngine, so both come
-		// from producer metadata rather than being re-derived from the rule text.
-		return PrimaryCandidate{
-			ArtifactContent:      string(rule.Content),
-			ArtifactType:         rule.ArtifactType,
-			CandidateID:          rule.CandidateID,
-			SelectedControlClass: rule.ControlClass,
-		}, probe.Capability, nil
+	rule, err := ExtractCustomWAFRule(js)
+	if err != nil {
+		return PrimaryCandidate{}, fmt.Errorf("control-translation result: %w", err)
 	}
-
-	var res struct {
-		PrimaryCandidate PrimaryCandidate `json:"primary_candidate"`
-	}
-	if err := json.Unmarshal(js, &res); err != nil {
-		return PrimaryCandidate{}, probe.Capability, fmt.Errorf("result_json parse: %w", err)
-	}
-	if strings.TrimSpace(res.PrimaryCandidate.ArtifactContent) == "" {
-		return PrimaryCandidate{}, probe.Capability, fmt.Errorf("primary_candidate.artifact_content is empty")
-	}
-	return res.PrimaryCandidate, probe.Capability, nil
+	// target_control_class feeds candidateKind and artifact_type feeds
+	// candidateEngine, so both come from producer metadata rather than being
+	// re-derived from the rule text.
+	return PrimaryCandidate{
+		ArtifactContent:      string(rule.Content),
+		ArtifactType:         rule.ArtifactType,
+		CandidateID:          rule.CandidateID,
+		SelectedControlClass: rule.ControlClass,
+	}, nil
 }
 
 func (r *DatabricksReader) Close() {

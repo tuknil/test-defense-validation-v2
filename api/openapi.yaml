@@ -5,9 +5,8 @@ info:
   description: >
     Resolves one defensive control candidate from a verified producer result and
     reports it (contract `defense-validation@1.0`). The rule may come from a
-    defense-generation or control-translation row named by `upstream_inputs`, from
-    immutable Check Generation and Defense Generation locators, or inline in the
-    request. The `shared-attack-contracts-v2` route additionally reads back the
+    control-translation row named by `upstream_inputs`, from immutable Check
+    Generation and Defense Generation locators, or inline in the request. The `shared-attack-contracts-v2` route additionally reads back the
     complete candidate bundle's application unit.
 
     This capability does NOT judge the rule: nothing is executed, no traffic is
@@ -337,19 +336,20 @@ components:
           description: >
             Upstream-mode input (env DV_INPUT_UPSTREAM). Each entry's result_ref
             points at a Databricks row. The rule is read from the
-            defense-generation entry's result_json.primary_candidate.artifact_content,
-            or, when there is no defense-generation entry, from the
-            control-translation entry's artifacts map (resolved by artifact_id and
-            verified against its content_hash). The top-level contract remains
-            "defense-validation@1.0" and canonical identity fields remain required.
+            control-translation entry, and only from that entry: its
+            primary_candidate carries no content, so the rule is resolved through
+            the artifacts map by artifact_id and verified against its content_hash.
+            A referenced result of any other capability is rejected. Other entries
+            may be present as lineage but are never read as the rule. The top-level
+            contract remains "defense-validation@1.0" and canonical identity fields
+            remain required.
           items:
             $ref: "#/components/schemas/UpstreamInput"
         primary_candidate:
           type: object
           description: >
-            Upstream defense-generation candidate; artifact_content carries the
-            ModSecurity rule. Accepted so a full defense-generation payload
-            validates. In upstream mode the rule is read from Databricks, not here.
+            Upstream producer candidate envelope. Accepted so a full producer
+            payload validates; the rule is read from Databricks, not from here.
         callback:
           type: object
           deprecated: true
@@ -436,13 +436,16 @@ components:
 
     UpstreamInput:
       type: object
+      description: >
+        One referenced producer result. Only the control-translation entry is read
+        as the rule; any other entry is lineage.
       properties:
         capability:
           type: string
-          example: defense-generation
+          example: control-translation
         contract_id:
           type: string
-          example: defense-generation@1.0
+          example: control-translation-result@2.0
         result_id:
           type: string
         result_ref:
@@ -450,11 +453,11 @@ components:
           properties:
             system: { type: string, example: databricks }
             catalog: { type: string, example: 36889_janus_dev }
-            schema: { type: string, example: defense_generation }
-            table: { type: string, example: defense_generation_results }
+            schema: { type: string, example: control_translation }
+            table: { type: string, example: control_translation_results }
             key:
               type: string
-              example: "defense-generation-result:c3b02e61c65fb24b3fa16aaf"
+              example: "control-translation-result:e0b7e5cf-24ce-4c2b-9112-afc3006576de"
         evidence_refs:
           type: array
           description: >

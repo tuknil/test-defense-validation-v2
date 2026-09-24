@@ -133,10 +133,11 @@ The rule can be obtained three ways, tried in this order:
    back. The match-rule document's own bytes are the rule.
 2. **`route_policy: registered-waf-route-v1`** — verifies two immutable producer
    locators (`defense_result`, `check_result`) and takes the DG candidate.
-3. **`upstream_inputs`** — reads the rule from a Databricks row. The
-   `defense-generation` entry's `primary_candidate.artifact_content` is used when
-   present; otherwise a `control-translation` entry's rule is resolved through its
-   `artifacts` map by `artifact_id` and verified against its `content_hash`.
+3. **`upstream_inputs`** — reads the rule from the `control-translation` entry's
+   Databricks row, and only from that entry. Its `primary_candidate` carries no
+   content, so the rule is resolved through the `artifacts` map by `artifact_id`
+   and verified against its `content_hash`. Any other producer's result is
+   rejected rather than guessed at.
 4. **inline `candidate`** — the rule travels in the request. This mode carries no
    producer lineage, so nothing is verified against an upstream result.
 
@@ -261,21 +262,29 @@ A **separate executor**, **on by default** (set env **`DV_INPUT_UPSTREAM`** to
 `0`/`false`/`no` to fall back to the legacy inline-`candidate` executor), serves the same
 `POST /v1/defense-validation-runs` endpoint with a different input contract. Instead
 of inline artifacts the request carries **`upstream_inputs`** — each entry's
-`result_ref` points at a Databricks row — and entries are selected **by
-`capability`**:
+`result_ref` points at a Databricks row — and the rule comes from the
+**`control-translation`** entry:
 
-- **`defense-generation`** → the mitigation **rule**: `SELECT result_json FROM
-  catalog.schema.table WHERE result_id = key` (using `DATABRICKS_DSN`) and extract
-  `primary_candidate.artifact_content` (kind/engine/action derived from it).
-- **`control-translation`** → the **translated rule**, used only when there is no
-  `defense-generation` entry. Its `primary_candidate` carries no content: the rule
-  is the `artifacts` map entry named by `artifact_id`, and it is verified against
-  its `content_hash` before being reported.
+```
+SELECT result_json FROM catalog.schema.table WHERE result_id = key
+```
 
-`defense-generation` keeps precedence when both entries are present. The resolved
-rule is fed to the shared reporting step, so the result shape is identical across
-all input modes. A read, parse or hash failure yields `failed` — a rule is never
-reported unverified — and so does a request with neither entry.
+(using `DATABRICKS_DSN`). That result's `primary_candidate` carries no content of
+its own: `artifact_id` names an entry in the flat `artifacts` map, and that entry's
+`content` — a JSON string — is the vendor rule. It is verified against its
+`content_hash`, and `primary_candidate.content_hash` must agree with the named
+artifact's, before anything is reported. `target_control_class` and `artifact_type`
+supply the candidate's kind and engine.
+
+Only a `control-translation` result is read. A referenced row of any other
+capability is rejected — its rule lives somewhere else entirely, and guessing would
+mean reporting a rule that was never verified. Other entries may appear in
+`upstream_inputs` as lineage, but they are never read as the rule.
+
+The resolved rule is fed to the shared reporting step, so the result shape is
+identical across all input modes. A read, parse or hash failure yields `failed` — a
+rule is never reported unverified — and so does a request with no
+`control-translation` entry.
 - Upstream mode is the default; set `DV_INPUT_UPSTREAM=0` to run only the inline
   executor. Both paths require canonical `contract_id: "defense-validation@1.0"`.
 

@@ -4,11 +4,12 @@ import (
 	"testing"
 )
 
-// Two upstream_inputs entries: defense-generation (rule) + check-generation (test).
-const twoEntryUpstream = `[
+// The rule entry is the control-translation one. A lineage entry alongside it must
+// not be mistaken for the rule.
+const controlTranslationUpstream = `[
   {
     "capability": "defense-generation",
-    "contract_id": "defense-generation@1.0",
+    "contract_id": "defense-generation-result@1.0",
     "result_id": "defense-generation-result:c3b02e61c65fb24b3fa16aaf",
     "result_ref": {
       "system": "databricks", "catalog": "36889_janus_dev", "schema": "defense_generation",
@@ -16,18 +17,18 @@ const twoEntryUpstream = `[
     }
   },
   {
-    "capability": "check-generation",
-    "contract_id": "check-generation@1.0",
-    "result_id": "check-generation-run-result:sha256:6f02",
+    "capability": "control-translation",
+    "contract_id": "control-translation-result@2.0",
+    "result_id": "control-translation-result:e0b7e5cf",
     "result_ref": {
-      "system": "databricks", "catalog": "36889_janus_dev", "schema": "check_generation",
-      "table": "check_generation_results", "key": "check-generation-run-result:sha256:6f02"
+      "system": "databricks", "catalog": "36889_janus_dev", "schema": "control_translation",
+      "table": "control_translation_results", "key": "control-translation-result:e0b7e5cf"
     }
   }
 ]`
 
 func TestSelectByCapability(t *testing.T) {
-	entries, err := parseUpstreamInputs([]byte(twoEntryUpstream))
+	entries, err := parseUpstreamInputs([]byte(controlTranslationUpstream))
 	if err != nil {
 		t.Fatalf("parseUpstreamInputs: %v", err)
 	}
@@ -35,14 +36,10 @@ func TestSelectByCapability(t *testing.T) {
 		t.Fatalf("got %d entries, want 2", len(entries))
 	}
 
-	rule := selectByCapability(entries, capDefenseGeneration)
-	if rule == nil || rule.ResultRef.Table != "defense_generation_results" ||
-		rule.ResultRef.Key != "defense-generation-result:c3b02e61c65fb24b3fa16aaf" {
-		t.Errorf("defense-generation selection wrong: %+v", rule)
-	}
-	check := selectByCapability(entries, capCheckGeneration)
-	if check == nil || check.ResultRef.Table != "check_generation_results" {
-		t.Errorf("check-generation selection wrong: %+v", check)
+	rule := selectByCapability(entries, capControlTranslation)
+	if rule == nil || rule.ResultRef.Table != "control_translation_results" ||
+		rule.ResultRef.Key != "control-translation-result:e0b7e5cf" {
+		t.Errorf("control-translation selection wrong: %+v", rule)
 	}
 	if got := selectByCapability(entries, "vuln-research"); got != nil {
 		t.Errorf("absent capability should be nil, got %+v", got)
@@ -51,10 +48,10 @@ func TestSelectByCapability(t *testing.T) {
 
 func TestSelectByCapabilitySkipsEmptyKey(t *testing.T) {
 	entries := []upstreamInput{
-		{Capability: "defense-generation", ResultRef: upstreamRef{Key: ""}}, // no key -> skipped
-		{Capability: "defense-generation", ResultRef: upstreamRef{Key: "k2", Table: "t"}},
+		{Capability: "control-translation", ResultRef: upstreamRef{Key: ""}}, // no key -> skipped
+		{Capability: "control-translation", ResultRef: upstreamRef{Key: "k2", Table: "t"}},
 	}
-	got := selectByCapability(entries, capDefenseGeneration)
+	got := selectByCapability(entries, capControlTranslation)
 	if got == nil || got.ResultRef.Key != "k2" {
 		t.Errorf("should skip empty-key entry, got %+v", got)
 	}
