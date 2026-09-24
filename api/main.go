@@ -188,6 +188,11 @@ func main() {
 		stimulusCLI(os.Args[2:])
 		return
 	}
+	// CLI: print the custom WAF rule from a control-translation result.
+	if len(os.Args) > 1 && os.Args[1] == "control-translation-waf-rule" {
+		controlTranslationCLI(os.Args[2:])
+		return
+	}
 
 	s, err := NewRunStore()
 	if err != nil {
@@ -221,7 +226,7 @@ func main() {
 
 	port := os.Getenv("PORT")
 	if port == "" {
-		port = "8090"
+		port = "8190"
 	}
 	srv := &http.Server{Addr: ":" + port, Handler: mux}
 	workerCtx, stopWorkers := context.WithCancel(context.Background())
