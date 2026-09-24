@@ -1,10 +1,10 @@
 # defense-validation: UI + API + Postgres as containers.
 #
-# The API launches the validation-substrate container on the host Docker daemon
-# (mounted docker.sock) and attaches it to the shared `defense-validation-net` network,
-# reaching it by name. The run ledger lives in the `db` Postgres container; its
-# data is on the named volume `pgdata`, which survives `docker stop` and
-# `docker rm` of the db container (only `docker compose down -v` deletes it).
+# The API resolves a defensive control candidate from a verified producer result
+# and reports it; it runs no substrate and needs no Docker socket. The run ledger
+# lives in the `db` Postgres container; its data is on the named volume `pgdata`,
+# which survives `docker stop` and `docker rm` of the db container (only
+# `docker compose down -v` deletes it).
 
 services:
   db:
@@ -46,18 +46,9 @@ services:
       DATABASE_SSL_MODE: ${DATABASE_SSL_MODE:-}
       DATABASE_MIGRATION_MODE: ${DATABASE_MIGRATION_MODE:-}
       AZURE_POSTGRES_TOKEN_SCOPE: ${AZURE_POSTGRES_TOKEN_SCOPE:-}
-      DV_SUBSTRATE_NETWORK: defense-validation-net
-      # Azure ACI execution mode (optional).
-      AZURE_SUBSCRIPTION_ID: ${AZURE_SUBSCRIPTION_ID:-}
-      DV_ACI_RESOURCE_GROUP: ${DV_ACI_RESOURCE_GROUP:-}
-      DV_ACI_REGION: ${DV_ACI_REGION:-}
-      # Service-principal auth for the "aci-sp" mode (works from a laptop or ACA).
       AZURE_TENANT_ID: ${AZURE_TENANT_ID:-}
       AZURE_CLIENT_ID: ${AZURE_CLIENT_ID:-}
       AZURE_CLIENT_SECRET: ${AZURE_CLIENT_SECRET:-}
-      JFROG_REGISTRY: ${JFROG_REGISTRY:-}
-      JFROG_USER: ${JFROG_USER:-}
-      JFROG_TOKEN: ${JFROG_TOKEN:-}
       DATABRICKS_DSN: ${DATABRICKS_DSN:-}
       DATABRICKS_CATALOG: ${DATABRICKS_CATALOG:-}
       DATABRICKS_SCHEMA: ${DATABRICKS_SCHEMA:-}
@@ -66,8 +57,6 @@ services:
       CAPABILITY_CALLBACK_ALLOWED_HOSTS: ${CAPABILITY_CALLBACK_ALLOWED_HOSTS:-}
     ports:
       - "8137:8137"
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock    # launch substrate containers
     depends_on:
       db:
         condition: service_healthy

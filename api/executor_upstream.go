@@ -1,32 +1,24 @@
 package main
 
-// executor_upstream.go is a SEPARATE executor selected by the env condition
-// variable DV_INPUT_UPSTREAM (truthy). It serves the same POST endpoint but takes
-// the new input contract: instead of inline artifacts, the request carries
-// upstream_inputs whose result_refs point at Databricks rows. Entries are selected
-// by capability:
-//   - "defense-generation": the mitigation rule is read from result_json
+// executor_upstream.go resolves the defensive control candidate named by the
+// request's upstream_inputs, whose result_refs point at Databricks rows, and
+// reports it. Entries are selected by capability:
+//   - "defense-generation": the rule is read inline from result_json
 //     (primary_candidate.artifact_content);
-//   - "control-translation": the fallback rule source when there is no
-//     defense-generation entry. Its primary_candidate holds no content; the rule
-//     is the artifacts-map entry named by artifact_id, resolved and hash-verified
-//     by ExtractCustomWAFRule (see control_translation.go). That rule is already a
-//     vendor-specific custom WAF artifact, so the run reports it and stops — no
-//     test basis, no evaluator (see reportCustomWAFRule);
-//   - "check-generation": the test is derived from result_json.run_result via the
-//     standalone stimulus converter (parseStimulus -> TestBasisFromStimulus).
+//   - "control-translation": the fallback when there is no defense-generation
+//     entry. Its primary_candidate holds no content; the rule is the
+//     artifacts-map entry named by artifact_id, resolved and hash-verified by
+//     ExtractCustomWAFRule (see control_translation.go).
 //
-// An inline test_basis in the request wins over the check-generation entry. The
-// resolved rule/test are fed to the shared executor via the inline candidate /
-// test_basis slots, so bring-up / WAF / verdict logic is reused unchanged.
+// Nothing is executed. The resolved rule is printed and carried on the result;
+// pushing it to a third-party control plane is the next stage, and any pass/fail
+// judgement about the rule belongs to that plane.
 
 import (
-	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log"
 	"os"
 	"regexp"
@@ -69,36 +61,34 @@ type upstreamInput struct {
 	EvidenceRefs []string    `json:"evidence_refs"`
 }
 
-// executeScenarioUpstream resolves the rule (and, when needed, the test) from
-// Databricks and delegates the run to the shared executor. Any resolution failure
-// is a could-not-test (never a fabricated verdict).
+// executeScenarioUpstream resolves the rule from Databricks and reports it. Any
+// resolution failure terminates the run as failed rather than reporting a rule
+// that was not verified.
 func executeScenarioUpstream(ctx context.Context, req SubmitDefenseValidationRequest, runID, resultID string) RunOutcome {
 	base := RunOutcome{RunID: runID, ResultID: resultID}
 
 	entries, err := parseUpstreamInputs(req.UpstreamInputs)
 	if err != nil {
-		return couldNotTest(base, "upstream_inputs: "+err.Error())
+		return resolutionFailed(base, "upstream_inputs: "+err.Error())
 	}
 	if dbxReader == nil {
-		return couldNotTest(base, "Databricks reader not configured (DATABRICKS_DSN unset)")
+		return resolutionFailed(base, "Databricks reader not configured (DATABRICKS_DSN unset)")
 	}
 
-	// Rule comes from the defense-generation entry, or from a control-translation
-	// entry when there is no defense-generation one. defense-generation keeps
-	// precedence so existing requests resolve to the same row as before; the
-	// fallback exists because a control-translation result carries the same rule
-	// after translation to a vendor syntax.
+	// defense-generation keeps precedence so existing requests resolve to the same
+	// row as before; control-translation is the fallback because it carries the same
+	// rule after translation to a vendor syntax.
 	ruleEntry := selectByCapability(entries, capDefenseGeneration)
 	if ruleEntry == nil {
 		ruleEntry = selectByCapability(entries, capControlTranslation)
 	}
 	if ruleEntry == nil {
-		return couldNotTest(base,
+		return resolutionFailed(base,
 			"no defense-generation or control-translation entry in upstream_inputs (need the rule)")
 	}
 	pc, sourceCapability, err := dbxReader.ReadCandidate(ctx, ruleEntry.ResultRef)
 	if err != nil {
-		return couldNotTest(base, "could not read rule from Databricks "+ruleEntry.ResultRef.qualified()+
+		return resolutionFailed(base, "could not read rule from Databricks "+ruleEntry.ResultRef.qualified()+
 			" where result_id="+ruleEntry.ResultRef.Key+": "+err.Error())
 	}
 	rule := strings.TrimSpace(pc.ArtifactContent)
@@ -112,77 +102,12 @@ func executeScenarioUpstream(ctx context.Context, req SubmitDefenseValidationReq
 		req.Candidate = b
 	}
 	logLifecycle("upstream_candidate_resolved", lifecycleIdentity(req, runID, resultID), map[string]any{
-		"candidate_kind": cand.Kind, "candidate_engine": cand.Engine, "candidate_action": cand.Action, "candidate_id": pc.CandidateID,
+		"candidate_kind": cand.Kind, "candidate_engine": cand.Engine, "candidate_action": cand.Action,
+		"candidate_id": pc.CandidateID, "source_capability": sourceCapability,
 	})
 
-	// A control-translation rule is already a vendor-specific custom WAF artifact,
-	// not a rule this service compiles and exercises. Report it and return: no test
-	// basis is derived and the evaluator is never reached.
-	if sourceCapability == capControlTranslation {
-		return reportCustomWAFRule(base, cand, ruleEntry.ResultRef, os.Stdout)
-	}
-
-	// A firewall candidate runs on the separate firewall evaluator, not the WAF path.
-	if cand.Kind == "firewall-rule" && req.ExecutionMode != execFirewall {
-		req.ExecutionMode = execFirewall
-	}
-	steps := []string{
-		"read " + cand.Kind + " from Databricks " + ruleEntry.ResultRef.qualified() +
-			" where result_id=" + ruleEntry.ResultRef.Key,
-	}
-
-	// Test: an inline test_basis wins; otherwise derive it from the check-generation
-	// entry's run_result via the standalone stimulus converter.
-	if len(req.TestBasis) == 0 {
-		if checkEntry := selectByCapability(entries, capCheckGeneration); checkEntry != nil {
-			runResult, err := dbxReader.ReadRunResult(ctx, checkEntry.ResultRef)
-			if err != nil {
-				return couldNotTest(base, "could not read run_result from Databricks "+checkEntry.ResultRef.qualified()+
-					" where result_id="+checkEntry.ResultRef.Key+": "+err.Error())
-			}
-			stim, err := parseStimulus(runResult)
-			if err != nil {
-				return couldNotTest(base, "check-generation run_result: "+err.Error())
-			}
-			tb, err := TestBasisFromStimulus(stim)
-			if err != nil {
-				return couldNotTest(base, "convert stimulus to test_basis: "+err.Error())
-			}
-			if b, e := json.Marshal(tb); e == nil {
-				req.TestBasis = b
-				logLifecycle("upstream_test_basis_resolved", lifecycleIdentity(req, runID, resultID), nil)
-			}
-			steps = append(steps, "derived test_basis from check-generation run_result "+
-				checkEntry.ResultRef.qualified()+" where result_id="+checkEntry.ResultRef.Key)
-		}
-	}
-
-	out := executeScenario(ctx, req, runID, resultID)
-	out.Steps = append(steps, out.Steps...)
-	return out
-}
-
-// reportCustomWAFRule writes an already-translated vendor rule to w and returns
-// the run outcome for it. Nothing is executed, so no block/pass verdict is
-// claimed: the terminal state stays could-not-test and the rule itself is carried
-// on the outcome so the canonical result still records exactly what was read.
-func reportCustomWAFRule(out RunOutcome, cand CandidateSpec, ref upstreamRef, w io.Writer) RunOutcome {
-	rule := CustomWAFRule{Content: []byte(cand.Rule)}
-	fmt.Fprintf(w, "custom WAF rule (%s / %s) read from %s where result_id=%s:\n%s\n",
-		cand.Kind, cand.Engine, ref.qualified(), ref.Key, rule.Pretty())
-
-	out.Candidate = &cand
-	out.Steps = append(out.Steps, fmt.Sprintf(
-		"read already-translated %s (%s) from Databricks %s where result_id=%s",
-		cand.Kind, cand.Engine, ref.qualified(), ref.Key))
-	out.ProseSummary = fmt.Sprintf(
-		"Reported the translated %s custom WAF rule; it was not executed, so no block/pass verdict is claimed.",
-		cand.Engine)
-	out.TerminalState = stateCouldNotTest
-	out.Actual.Detail = "candidate is an already-translated custom WAF rule; reported without execution"
-	out.Limitations = append(out.Limitations,
-		"No attack or benign traffic was run: this service does not execute "+cand.Engine+" rules.")
-	return out
+	return reportResolvedRule(base, cand, sourceCapability,
+		"Databricks "+ruleEntry.ResultRef.qualified()+" where result_id="+ruleEntry.ResultRef.Key, os.Stdout)
 }
 
 func lifecycleIdentity(req SubmitDefenseValidationRequest, runID, resultID string) DurableRun {
@@ -390,46 +315,6 @@ func primaryCandidateFromResultJSON(js []byte) (PrimaryCandidate, string, error)
 		return PrimaryCandidate{}, probe.Capability, fmt.Errorf("primary_candidate.artifact_content is empty")
 	}
 	return res.PrimaryCandidate, probe.Capability, nil
-}
-
-// ReadRunResult reads result_json for ref.Key from the referenced table and returns
-// its run_result object — the standalone stimulus converter's input.
-func (r *DatabricksReader) ReadRunResult(ctx context.Context, ref upstreamRef) (json.RawMessage, error) {
-	if r == nil || r.db == nil {
-		return nil, fmt.Errorf("reader not configured")
-	}
-	q := "SELECT result_json FROM " + ref.qualified() + " WHERE result_id = ? LIMIT 1"
-	c, cancel := context.WithTimeout(ctx, 60*time.Second)
-	defer cancel()
-	start := time.Now()
-
-	var js string
-	if err := r.db.QueryRowContext(c, q, ref.Key).Scan(&js); err != nil {
-		log.Printf("databricks reader: READ FAILED (result_id=%s) after %s: %v",
-			ref.Key, time.Since(start).Round(time.Millisecond), err)
-		return nil, err
-	}
-	rr, err := extractRunResult([]byte(js))
-	if err != nil {
-		return nil, err
-	}
-	log.Printf("databricks reader: READ OK run_result (result_id=%s) in %s",
-		ref.Key, time.Since(start).Round(time.Millisecond))
-	return rr, nil
-}
-
-// extractRunResult pulls the run_result object out of a result_json document.
-func extractRunResult(js []byte) (json.RawMessage, error) {
-	var res struct {
-		RunResult json.RawMessage `json:"run_result"`
-	}
-	if err := json.Unmarshal(js, &res); err != nil {
-		return nil, fmt.Errorf("result_json parse: %w", err)
-	}
-	if len(res.RunResult) == 0 || string(bytes.TrimSpace(res.RunResult)) == "null" {
-		return nil, fmt.Errorf("result_json.run_result is missing")
-	}
-	return res.RunResult, nil
 }
 
 func (r *DatabricksReader) Close() {

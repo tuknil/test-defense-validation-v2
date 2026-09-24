@@ -59,10 +59,10 @@ func TestControlTranslationCandidateClassification(t *testing.T) {
 	}
 }
 
-// TestReportCustomWAFRulePrintsTheRuleAndClaimsNoVerdict covers the
-// control-translation short circuit: the already-translated rule is printed and
-// the run ends there, with no test basis derived and nothing compiled.
-func TestReportCustomWAFRulePrintsTheRuleAndClaimsNoVerdict(t *testing.T) {
+// TestReportResolvedRulePrintsTheRuleAndClaimsNoVerdict covers the reporting
+// step: the resolved rule is printed and the run ends there, with no verdict of
+// any kind on the outcome.
+func TestReportResolvedRulePrintsTheRuleAndClaimsNoVerdict(t *testing.T) {
 	pc, capability, err := primaryCandidateFromResultJSON(controlTranslationFixture(t))
 	if err != nil {
 		t.Fatal(err)
@@ -77,38 +77,58 @@ func TestReportCustomWAFRulePrintsTheRuleAndClaimsNoVerdict(t *testing.T) {
 		Rule:   rule,
 		Action: deriveRuleAction(rule),
 	}
-	ref := upstreamRef{Catalog: "cat", Schema: "control_translation", Table: "control_translation_results",
-		Key: "control-translation-result:e0b7e5cf"}
+	const sourceDetail = "Databricks `control_translation`.`control_translation_results` " +
+		"where result_id=control-translation-result:e0b7e5cf"
 
 	var printed bytes.Buffer
-	out := reportCustomWAFRule(RunOutcome{RunID: "dv-run-1", ResultID: "r"}, cand, ref, &printed)
+	out := reportResolvedRule(RunOutcome{RunID: "dv-run-1", ResultID: "r"}, cand,
+		capControlTranslation, sourceDetail, &printed)
 
 	// The rule is printed, decoded and indented.
 	text := printed.String()
 	if !strings.Contains(text, `"configurationType": "akamai-custom-rule-set"`) {
 		t.Error("the rule set was not printed in decoded, indented form")
 	}
-	if !strings.Contains(text, ref.Key) {
+	if !strings.Contains(text, "control-translation-result:e0b7e5cf") {
 		t.Error("printed output should name the row it was read from")
 	}
 
-	// No verdict is claimed, because nothing was executed.
-	if out.TerminalState != stateCouldNotTest {
-		t.Errorf("terminal_state = %q, want %q", out.TerminalState, stateCouldNotTest)
-	}
-	if out.Match || out.Actual.Blocked {
-		t.Error("no traffic was run, so match/blocked must stay false")
+	// The run resolved a rule; it made no claim about the rule.
+	if out.TerminalState != stateRuleResolved {
+		t.Errorf("terminal_state = %q, want %q", out.TerminalState, stateRuleResolved)
 	}
 	if len(out.Limitations) == 0 {
 		t.Error("the outcome must record that nothing was executed")
 	}
 
-	// The rule itself is carried on the outcome, and no test basis was derived.
+	// The rule itself is carried on the outcome.
 	if out.Candidate == nil || out.Candidate.Rule != rule {
 		t.Error("the reported rule must be carried on the outcome")
 	}
-	if out.TestBasis != nil {
-		t.Error("no test basis should be derived for an already-translated rule")
+}
+
+// TestRunOutcomeCarriesNoVerdictFields is a structural guard: the result envelope
+// must not regrow a verdict. Anything that judges the rule belongs to the control
+// plane the rule is pushed to, not to this capability.
+func TestRunOutcomeCarriesNoVerdictFields(t *testing.T) {
+	encoded, err := json.Marshal(RunOutcome{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fields map[string]any
+	if err := json.Unmarshal(encoded, &fields); err != nil {
+		t.Fatal(err)
+	}
+	for _, banned := range []string{"match", "expected", "actual", "substrate", "test_basis",
+		"obligation_results", "accounting"} {
+		if _, present := fields[banned]; present {
+			t.Errorf("RunOutcome must not carry the verdict field %q", banned)
+		}
+	}
+	for _, state := range []string{stateRuleResolved, stateFailed, stateMalfunction} {
+		if state == "blocked" || state == "not-blocked" || state == "could-not-test" {
+			t.Errorf("terminal state %q is a verdict", state)
+		}
 	}
 }
 
@@ -131,9 +151,6 @@ func TestPrimaryCandidateFromResultJSONKeepsTheInlineDefenseGenerationShape(t *t
 	}
 	if engine := candidateEngine(pc, pc.ArtifactContent); engine != "modsecurity" {
 		t.Errorf("candidateEngine = %q, want modsecurity", engine)
-	}
-	if _, err := compileRule(CandidateSpec{Rule: pc.ArtifactContent}); err != nil {
-		t.Errorf("a ModSecurity rule must still compile: %v", err)
 	}
 }
 

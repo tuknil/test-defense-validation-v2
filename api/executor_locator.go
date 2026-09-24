@@ -53,16 +53,14 @@ type ImmutableResultLocator struct {
 }
 
 type LocatorProvenance struct {
-	RoutePolicy         string                 `json:"route_policy"`
-	DefenseResult       ImmutableResultLocator `json:"defense_result"`
-	CheckResult         ImmutableResultLocator `json:"check_result"`
-	SelectedTestBasisID string                 `json:"selected_test_basis_id,omitempty"`
-	Verification        string                 `json:"verification"`
+	RoutePolicy   string                 `json:"route_policy"`
+	DefenseResult ImmutableResultLocator `json:"defense_result"`
+	CheckResult   ImmutableResultLocator `json:"check_result"`
+	Verification  string                 `json:"verification"`
 }
 
 type resolvedLocatorInputs struct {
 	Candidate    CandidateSpec
-	TestBasis    TestBasisSpec
 	Provenance   LocatorProvenance
 	EvidenceRefs []string
 }
@@ -111,26 +109,14 @@ func validateLocatorRequest(req SubmitDefenseValidationRequest) []string {
 	if req.ProfileID != "" {
 		bad = append(bad, "profile_id")
 	}
-	if req.SubstrateSelector != "" {
-		bad = append(bad, "substrate_selector")
-	}
-	if len(req.Substrate) > 0 {
-		bad = append(bad, "substrate")
-	}
 	if len(req.Candidate) > 0 {
 		bad = append(bad, "candidate")
-	}
-	if len(req.TestBasis) > 0 {
-		bad = append(bad, "test_basis")
 	}
 	if len(req.UpstreamInputs) > 0 {
 		bad = append(bad, "upstream_inputs")
 	}
 	if len(req.PrimaryCandidateRaw) > 0 || len(req.AttemptHistory) > 0 || len(req.OutcomeReason) > 0 || len(req.ProofHandoffs) > 0 || len(req.UpstreamResultRef) > 0 || req.ProducedAt != "" || req.UpstreamProse != "" || req.UpstreamResultID != "" || req.UpstreamTerminal != "" {
 		bad = append(bad, "inline_upstream_content")
-	}
-	if req.ExecutionMode != "" && req.ExecutionMode != execInMemory {
-		bad = append(bad, "execution_mode")
 	}
 	return bad
 }
@@ -179,23 +165,18 @@ func executeScenarioByLocator(ctx context.Context, req SubmitDefenseValidationRe
 	base := RunOutcome{RunID: runID, ResultID: resultID}
 	resolver, err := newLocatorInputResolver()
 	if err != nil {
-		return couldNotTest(base, "reference-only input resolver: "+err.Error())
+		return resolutionFailed(base, "reference-only input resolver: "+err.Error())
 	}
 	defer resolver.Close()
 	resolved, err := resolver.Resolve(ctx, *req.DefenseResult, *req.CheckResult, strings.TrimSpace(req.TestBasisID))
 	if err != nil {
-		return couldNotTest(base, "reference-only input resolution failed: "+err.Error())
+		return resolutionFailed(base, "reference-only input resolution failed: "+err.Error())
 	}
-	req.ExecutionMode = execInMemory
-	req.CandidateArtifactID = resolved.Candidate.RuleID
-	req.TestBasisID = resolved.Provenance.SelectedTestBasisID
-	req.CheckProfileID = "defense-validation-profile:waf-http:1"
-	req.Candidate, _ = json.Marshal(resolved.Candidate)
-	req.TestBasis, _ = json.Marshal(resolved.TestBasis)
-	out := executeScenario(ctx, req, runID, resultID)
+	out := reportResolvedRule(base, resolved.Candidate, capDefenseGeneration,
+		"the verified Defense Generation result "+resolved.Provenance.DefenseResult.ResultID, os.Stdout)
 	out.InputProvenance = &resolved.Provenance
 	out.EvidenceRefs = append([]string(nil), resolved.EvidenceRefs...)
-	out.Steps = append([]string{"verified immutable Defense Generation and Check Generation locators", "hydrated registered WAF candidate and HTTP mitigation test basis"}, out.Steps...)
+	out.Steps = append([]string{"verified immutable Defense Generation and Check Generation locators"}, out.Steps...)
 	return out
 }
 
@@ -226,7 +207,7 @@ func (r *databricksLocatorResolver) Close() error {
 	return r.closer.Close()
 }
 
-func (r *databricksLocatorResolver) Resolve(ctx context.Context, defense, check ImmutableResultLocator, selectedTestBasisID string) (resolvedLocatorInputs, error) {
+func (r *databricksLocatorResolver) Resolve(ctx context.Context, defense, check ImmutableResultLocator, _ string) (resolvedLocatorInputs, error) {
 	if err := validateImmutableLocator(defense, capDefenseGeneration); err != nil {
 		return resolvedLocatorInputs{}, fmt.Errorf("defense_result: %w", err)
 	}
@@ -254,15 +235,13 @@ func (r *databricksLocatorResolver) Resolve(ctx context.Context, defense, check 
 	if len(checkRows) != 1 {
 		return resolvedLocatorInputs{}, fmt.Errorf("Check Generation locator resolved %d rows, expected exactly one", len(checkRows))
 	}
-	runResult, checkEvidence, err := r.verifyCheckRow(ctx, checkRows[0], check)
-	if err != nil {
+	// The Check Generation row is still fully verified: it is the lineage half of
+	// the reference-only input, even though no test is derived from it any more.
+	if _, checkEvidence, err := r.verifyCheckRow(ctx, checkRows[0], check); err != nil {
 		return resolvedLocatorInputs{}, err
+	} else {
+		return resolvedLocatorInputs{Candidate: candidate, EvidenceRefs: stableStringUnion(defenseEvidence, checkEvidence), Provenance: LocatorProvenance{RoutePolicy: locatorRoutePolicy, DefenseResult: defense, CheckResult: check, Verification: "physical-and-logical-sha256-verified"}}, nil
 	}
-	basisID, basis, err := selectRegisteredHTTPTestBasis(runResult, selectedTestBasisID)
-	if err != nil {
-		return resolvedLocatorInputs{}, err
-	}
-	return resolvedLocatorInputs{Candidate: candidate, TestBasis: basis, EvidenceRefs: stableStringUnion(defenseEvidence, checkEvidence), Provenance: LocatorProvenance{RoutePolicy: locatorRoutePolicy, DefenseResult: defense, CheckResult: check, SelectedTestBasisID: basisID, Verification: "physical-and-logical-sha256-verified"}}, nil
 }
 
 type defenseRow struct{ RunID, ResultID, TerminalState, ResultJSON string }
@@ -807,56 +786,6 @@ func validateManifestShape(raw []byte) error {
 		return fmt.Errorf("manifest Volume fields are invalid")
 	}
 	return nil
-}
-
-type checkArtifactProjection struct {
-	Artifacts []struct {
-		ArtifactID   string `json:"artifact_id"`
-		ArtifactKind string `json:"artifact_kind"`
-		Signal       *struct {
-			CandidateFamily string   `json:"candidate_family"`
-			Stimulus        Stimulus `json:"stimulus"`
-		} `json:"mitigation_checkable_signal"`
-	} `json:"artifacts"`
-}
-
-func selectRegisteredHTTPTestBasis(runResult json.RawMessage, selectedID string) (string, TestBasisSpec, error) {
-	var projection checkArtifactProjection
-	if err := json.Unmarshal(runResult, &projection); err != nil {
-		return "", TestBasisSpec{}, fmt.Errorf("decode Check Generation run_result: %w", err)
-	}
-	for _, artifact := range projection.Artifacts {
-		if selectedID != "" && artifact.ArtifactID != selectedID {
-			continue
-		}
-		if artifact.ArtifactKind != "mitigation-checkable-signal" || artifact.Signal == nil || artifact.Signal.CandidateFamily != "http-probe" || strings.TrimSpace(artifact.ArtifactID) == "" || strings.TrimSpace(artifact.Signal.Stimulus.Method) == "" || strings.TrimSpace(artifact.Signal.Stimulus.PathKey) == "" {
-			continue
-		}
-		basis, err := TestBasisFromStimulus(artifact.Signal.Stimulus)
-		if err != nil {
-			return "", TestBasisSpec{}, err
-		}
-		basis.Kind, basis.ProofBasis = "http-request-attack", "mitigation-discriminator"
-		basis.Request.Path = registeredWAFPath(artifact.Signal.Stimulus.PathKey)
-		return artifact.ArtifactID, basis, nil
-	}
-	if selectedID != "" {
-		return "", TestBasisSpec{}, fmt.Errorf("selected test_basis_id %q is not an eligible HTTP mitigation artifact", selectedID)
-	}
-	return "", TestBasisSpec{}, fmt.Errorf("Check Generation produced no supported HTTP mitigation test basis")
-}
-func registeredWAFPath(pathKey string) string {
-	pathKey = strings.TrimSpace(pathKey)
-	if pathKey == "public_submit_php" {
-		return "/public/submit.php"
-	}
-	if strings.HasPrefix(pathKey, "/") {
-		return pathKey
-	}
-	if strings.Contains(pathKey, "/") || strings.Contains(pathKey, ".") {
-		return "/" + pathKey
-	}
-	return "/"
 }
 
 func sha256Value(content []byte) string {

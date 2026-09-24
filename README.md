@@ -1,8 +1,13 @@
 # defense-validation webapp
 
-A stepwise prototype of the `defense-validation@1.0` capability (see
+A prototype of the `defense-validation@1.0` capability (see
 [defense-validation-lld.md](defense-validation-lld.md)), built as a **separate UI and
 Go API server**.
+
+It resolves a defensive control candidate from a verified producer result and
+reports it. **It produces no verdict of any kind** — nothing is executed and no
+traffic is sent. Pushing the resolved rule to a third-party control plane is the
+next stage of this repo.
 
 ## Durable asynchronous lifecycle
 
@@ -31,9 +36,7 @@ recovery completes the transition to `canceled`.
 The accepted contract is always `defense-validation@1.0`, independent of
 `DV_INPUT_UPSTREAM`. Canonical requests may carry inline artifacts,
 `upstream_inputs`, or both. Upstream resolution is selected only when configured
-and `upstream_inputs` is present. Omitted `execution_mode`, request method,
-request path, and request headers are normalized to `inmemory`, `GET`, `/`, and
-an empty object before the idempotency digest is calculated.
+and `upstream_inputs` is present.
 
 An additive reference-only mode accepts no executable inline content. It requires
 `route_policy: registered-waf-route-v1` and exactly two complete immutable
@@ -42,18 +45,16 @@ only `36889_janus_dev.defense_generation.defense_generation_results` and
 `36889_janus_dev.check_generation.check_generation_results`, requires exactly
 one row from each, verifies row and logical-result identity and SHA-256 metadata,
 and hydrates a Check Generation payload only from the fixed managed Volume
-`/Volumes/36889_janus_dev/check_generation/payloads`. A supplied `test_basis_id`
-is a non-executable selector and must exactly identify an eligible
-`mitigation-checkable-signal` HTTP artifact; when omitted, the first eligible
-artifact is selected. The resolver verifies the complete current Defense
+`/Volumes/36889_janus_dev/check_generation/payloads`. The Check Generation half is
+verified for lineage even though no test is derived from it. The resolver verifies the complete current Defense
 Generation canonical producer shape, including fully populated upstream result
 references, checks `primary_candidate.artifact_hash` against the exact artifact
 content, and validates the Check Generation persisted wrapper plus strict
-completion/result contract versions. Both verified locators and the selected
-artifact ID are retained in result `input_provenance`, while verified producer
+completion/result contract versions. Both verified locators are retained in result
+`input_provenance`, while verified producer
 evidence lineage is stably deduplicated into result `evidence_refs`. Locator SQL
 queries have a fixed 60-second deadline. Databricks input resolution is created
-only when a reference-only run executes; inline and local startup remain usable
+only when a reference-only run needs it; inline and local startup remain usable
 without Databricks input configuration.
 
 The WAF-first shared-contract path is additive and selected with
@@ -67,22 +68,11 @@ every DG artifact and directive, exact obligation mappings, candidate and bundle
 digests, and the complete all-or-nothing application unit. The older
 `registered-waf-route-v1` and inline/upstream paths are unchanged for replay.
 
-V2 constructs every exact required `(obligation_id, input_id)` assignment. It
-applies and reads back all candidate artifacts before executing any case, then
-executes query, named-header, cookie, method, raw-body, and JSON-body HTTP inputs
-without converting absent, empty, and present body states into one another.
-Non-HTTP inputs in the WAF-first slice receive an explicit `unsupported`
-disposition. Safety stops are likewise retained as case dispositions.
-
-Destination-free `http-request-template` inputs resolve only through the
-embedded `waf-standard@2` profile. The immutable `waf-standard@1` profile remains
-available for legacy replay. The adapter may add only scheme, authority,
-and path. Each case records its template input ID and path key, resolver and
-profile IDs, immutable resolver/profile digest, and exact rendered request.
-Unknown profiles or path keys fail closed. Results add `profile_id`, complete
-`obligation_results`, the read-back `application_unit`, and
-`CoverageAccounting`; represented and unsupported source-member sets are
-disjoint and complete, and every unaccounted count is zero.
+V2 reads back the complete candidate artifact set all-or-nothing: a match-rule and
+a carrier-configuration artifact must both be present, agree on their rule set, and
+cover exactly the same rules. The match-rule document's own bytes are then the rule
+that gets reported. Results add `profile_id` and the read-back `application_unit`,
+which is provenance for the rule rather than a judgement about it.
 
 Exact schemas, the offline catalog, route profile, direct CG/DG chain fixtures,
 and provenance manifests are checked into `api/contracts/shared-attack-contracts`
@@ -128,168 +118,55 @@ deprecated synchronous path `POST /v1/compat/defense-validation-runs`. Enabling
 `DV_INPUT_UPSTREAM` does not reroute an inline compatibility request unless that
 request actually contains `upstream_inputs`.
 
-## Step 1 — Submit a defense-validation run
+## What a run does
 
-Scope: create a mitigation scenario aligned with the input contract, render a
-form to display/edit the input payload, and POST it.
+A run resolves one **defensive control candidate** — the rule — and reports it.
+It does not execute the rule, send attack or benign traffic, bring up a substrate,
+or decide whether the rule blocks anything. Pushing the rule to a third-party
+control plane is the next stage, and any pass/fail determination belongs to that
+plane.
 
-- **API** (`api/`) — Go server exposing `POST /v1/defense-validation-runs`
-  (LLD §9.1). It strictly validates the `SubmitDefenseValidationRequest@1` contract
-  (LLD §10.1): `contract_id` const, required non-empty `candidate_artifact_id` /
-  `test_basis_id` / `check_profile_id`, optional `substrate_selector`, and
-  rejects unknown fields (`additionalProperties: false`). On success it returns
-  an accepted run reference `{run_id, result_id, status:"accepted"}`. Errors use
-  the controlled `invalid-input` category (LLD §9.5).
-- **UI** (`ui/`) — static HTML/CSS/JS. A contract-aligned form pre-filled with
-  the LLD §9.1 example scenario, a live JSON request preview, and a Submit button
-  that POSTs to the API.
+The rule can be obtained three ways, tried in this order:
 
-Out of scope for Step 1: queue, persistence, events.
+1. **`route_policy: shared-attack-contracts-v2`** — verifies the compact CG
+   semantics and the DG candidate bundle, then reads the complete application unit
+   back. The match-rule document's own bytes are the rule.
+2. **`route_policy: registered-waf-route-v1`** — verifies two immutable producer
+   locators (`defense_result`, `check_result`) and takes the DG candidate.
+3. **`upstream_inputs`** — reads the rule from a Databricks row. The
+   `defense-generation` entry's `primary_candidate.artifact_content` is used when
+   present; otherwise a `control-translation` entry's rule is resolved through its
+   `artifacts` map by `artifact_id` and verified against its `content_hash`.
+4. **inline `candidate`** — the rule travels in the request. This mode carries no
+   producer lineage, so nothing is verified against an upstream result.
 
-## Step 2 — Actually execute the scenario on submit
+Every resolution failure ends the run as `failed`; a rule is never reported unless
+it resolved and verified.
 
-On submit the API now runs the scenario for real (LLD §5, §6.4 local-WAF
-substrate adapter, §6.5 verdict engine):
+### Terminal states
 
-1. **Bring up the substrate** — `docker run` the container image named in the
-   request body (e.g. `ghcr.io/christophetd/log4shell-vulnerable-app`) on a
-   private `127.0.0.1` port and wait until it is ready.
-2. **Apply the candidate** — parse the candidate's actual ModSecurity `SecRule`
-   (its `@rx` pattern + `id`/`status` actions) and stand it up as an in-process
-   WAF in front of the container.
-3. **Run the test** — send the supplied attack request through the WAF.
-4. **Observe & decide** — a match denies at the WAF → `blocked`; otherwise the
-   request reaches the live app and its status is observed → `not-blocked`. If the
-   container can't be brought up or observed → `could-not-test` (never a
-   fabricated verdict, per LLD §7.2).
-5. **Tear down** the container (`--rm`).
+| State | Meaning |
+|---|---|
+| `rule-resolved` | A rule was read from a verified producer result and reported. **This says nothing about whether the rule is effective.** |
+| `failed` | No rule could be resolved. |
+| `malfunction` | Internal fault, not a bad input. |
 
-The response returns the terminal state plus **actual vs expected** and an
-execution step log. Requires a running Docker daemon; without one the run
-returns `could-not-test` with a reason.
+There is no `blocked` / `not-blocked` / `could-not-test`, and the result carries no
+`match`, `expected`, `actual` or `substrate`: this capability reports the rule, it
+does not judge it.
 
-> The WAF faithfully enforces the *specific* SecRule shipped in the candidate
-> (pattern, targets, deny/status). It is not the full ModSecurity engine —
-> swapping in a real ModSecurity container is an adapter change behind the same
-> flow.
+### Reading the rule from the CLI
 
-### Execution mode: local Docker vs Azure ACI
+The control-translation extractor is also available standalone, without the API or
+a database:
 
-The substrate can be brought up two ways, selected by the **Execution mode**
-toggle in the UI (or `execution_mode` in the request: `local` | `aci`). Only the
-bring-up/teardown differs — the WAF, test, and verdict are identical.
+```bash
+cd api && go run . control-translation-waf-rule testdata/control-translation-result.json
+```
 
-- **`local`** — `docker run` on the host daemon (`docker.sock`). What
-  Docker Compose uses.
+It resolves `primary_candidate.artifact_id` against the `artifacts` map, verifies
+`content_hash`, and prints the rule with its provenance.
 
-- **`inmemory`** (**default** when the request omits `execution_mode`) — runs the whole scenario **inside the API process**: the target
-  is an in-process HTTP stand-in (started on a loopback port), with the same
-  in-memory WAF in front. **No Docker socket, no external container, no cloud, no
-  network** — so it runs anywhere (including ACA) and completes in milliseconds.
-  Fidelity trade-off: the target is a stand-in, not the real CVE image, so it
-  validates the **rule logic**, not the real vulnerable binary (a weaker proof
-  than `local`/`aci`). Great for fast rule iteration and CI. Because the target is
-  a stand-in, the request may **omit `substrate` entirely** in this mode (the
-  result records `image: "(no substrate provided)"`); every other mode still
-  requires `substrate.image` and returns `could-not-test` without it.
-
-- **`firewall`** — a **separate in-memory evaluator** for **network firewall rules
-  (L3/L4)**, distinct from the L7 WAF path. No substrate/container: it parses the
-  candidate firewall rule and a supplied **network-connection** test (5-tuple) and
-  decides block/pass in-process. Fits Log4Shell as an **egress control** — a rule
-  that denies the outbound JNDI callback (LDAP/RMI) mitigates exploitation.
-
-  Two `candidate.rule` syntaxes are accepted (both evaluated in-memory against the
-  connection 5-tuple):
-  - **compact:** `<action> <proto> <src> -> <dst>[:<port|lo-hi|*>]`, e.g.
-    `deny tcp any -> any:1389`;
-  - **iptables** (set `engine: "iptables"` or use a rule with `-j`), e.g.
-    `-A OUTPUT -p tcp -m multiport --dports 389,636,1099,1389 -j DROP` — it parses
-    `-p`, `-s`, `-d` (IP/CIDR), `--dport` (single or `lo:hi`), `-m multiport
-    --dports`, and `-j DROP|REJECT|ACCEPT`.
-
-  The test is
-  `{ kind: "network-connection", connection: {protocol, src_ip, dst_ip, dst_port}, expected: {blocked} }`.
-  See `scenarios/05-firewall-egress-block.json` (compact TP),
-  `scenarios/06-firewall-egress-miss.json` (compact FN),
-  `scenarios/09-firewall-iptables-block.json` (iptables TP) and
-  `scenarios/10-firewall-iptables-miss.json` (iptables FN — rule too narrow).
-- **`aci`** — Azure Container Instances. For when the API is hosted on **Azure
-  Container Apps**, which can't mount a Docker socket or launch sibling
-  containers. The adapter creates a per-run ACI container group, runs the test
-  against it over the network, then deletes it (LLD §3.3, §6.4 pluggable
-  substrate adapter). It authenticates with `DefaultAzureCredential` (a managed
-  identity on ACA, or env/`az` locally) and needs:
-
-  ```
-  AZURE_SUBSCRIPTION_ID, DV_ACI_RESOURCE_GROUP, DV_ACI_REGION
-  ```
-
-  Optional: `DV_ACI_CPU`, `DV_ACI_MEMORY_GB`, and private-registry creds via
-  `DV_ACI_REGISTRY_*` (falls back to `JFROG_*`). When Azure isn't configured, an
-  `aci` run returns `could-not-test` with that reason rather than failing — so
-  the mode is selectable everywhere; real execution needs Azure.
-
-- **`aci-sp`** — same ACI substrate, but authenticated with an explicit **service
-  principal** instead of a managed identity. Portable: works from a **laptop** or
-  on **ACA** with the same env vars. In addition to the three `AZURE_*`/`DV_ACI_*`
-  values above, set:
-
-  ```
-  AZURE_TENANT_ID, AZURE_CLIENT_ID, AZURE_CLIENT_SECRET
-  ```
-
-  (The `aci` mode also accepts these via `DefaultAzureCredential`; `aci-sp` just
-  makes the service-principal path explicit and required.)
-
-- **`github`** — runs the scenario on a **GitHub Actions** runner. On submit the
-  API dispatches a `workflow_dispatch` in the configured repo (passing the run id
-  + the scenario as inputs), waits for the run to complete, downloads the result
-  artifact, and stores it — so the ledger row is identical to a local run. The
-  workflow (`.github/workflows/defense-validation.yml`) runs **this same executor**
-  via the `run-scenario` CLI, so the logic is shared, not reimplemented. Config
-  (via docker compose `.env`):
-
-  ```
-  GITHUB_REPO=owner/repo        # repo that holds the workflow (on its default branch)
-  GITHUB_USERNAME=<user>        # informational
-  GITHUB_TOKEN=<PAT>            # actions:write on that repo
-  GITHUB_WORKFLOW=defense-validation.yml   # optional (default)
-  GITHUB_REF=main                        # optional (default)
-  ```
-
-  The workflow must exist on the repo's **default branch** for the dispatch API
-  to find it. When GitHub isn't configured a `github` run returns
-  `could-not-test`.
-
-- **`github-ghcr`** — a **separate** GitHub mode (does not modify `github`) that
-  **relays the substrate image through the repo's GHCR** first, so the runner
-  needs no access to the source registry (useful when the source is a private
-  Artifactory the runner can't reach). On submit the API:
-  1. sets a repo Actions secret `GHCR_PAT` (libsodium sealed box) so the runner
-     can pull the private relayed image — there is no API to change package
-     visibility, so it grants the runner a read token instead;
-  2. pulls the source image locally, retags it `ghcr.io/<owner>/<name>`, and
-     pushes it (host-daemon push);
-  3. dispatches `.github/workflows/defense-validation-ghcr.yml`, which logs in to
-     GHCR with `GHCR_PAT` and runs the scenario against the relayed image.
-
-  The relay is **daemonless** (a pure-Go registry-to-registry copy via
-  go-containerregistry) — **no local Docker / docker.sock**, so it runs on Azure
-  Container Apps. It needs egress to both registries and a token with
-  **`write:packages`** (push); the workflow uses the stored token for
-  `read:packages` (pull). A private source registry is authenticated from
-  `DV_ACI_REGISTRY_*` / `JFROG_*` env. The relayed package stays **private**.
-
-### Which modes run on Azure Container Apps (no docker.sock)
-
-| Mode | Runs on ACA? | Why |
-|---|---|---|
-| `inmemory` | ✅ | in-process |
-| `aci` / `aci-sp` | ✅ | Azure API, no local Docker |
-| `github` | ✅ | just dispatches over HTTP; substrate runs on the runner |
-| `github-ghcr` | ✅ | daemonless relay + HTTP dispatch |
-| `local` | ❌ | needs the host Docker socket (local dev only) |
 
 ## Step 3 — Run ledger
 
@@ -341,8 +218,8 @@ or workspace access configuration must be corrected.
 ### Result envelope
 
 Every run response (and the stored ledger/`GET` record) leads with a compact
-envelope, then **appends** the full verdict detail (`match`, `expected`, `actual`,
-`substrate`, the resolved `candidate` rule and `test_basis`, `steps`, …). The
+envelope, then appends the resolved `candidate` rule, `detail`, `steps` and
+`limitations`. There is no verdict detail. The
 `candidate` and `test_basis` are embedded so a `defense_validation` row is
 self-contained — a downstream consumer reads the rule and test from that row and
 need not query the upstream table the rule was sourced from:
@@ -353,7 +230,7 @@ need not query the upstream table the rule was sourced from:
   "contract_id": "defense-validation@1.0",
   "run_id": "dv-run-…",
   "result_id": "defense-validation-result:1c40b2497a6f766452572f2c",
-  "terminal_state": "blocked",
+  "terminal_state": "rule-resolved",
   "status": "completed",
   "correlation_id": "mc-request:CVE-2021-44228:waf:1",
   "result_ref": {
@@ -364,8 +241,8 @@ need not query the upstream table the rule was sourced from:
 }
 ```
 
-- `terminal_state` — the test result (`blocked` / `not-blocked` / `could-not-test`
-  / `scope-declined` / `malfunction`).
+- `terminal_state` — `rule-resolved`, `failed`, or `malfunction`. It reports
+  whether a rule could be resolved, never whether the rule is effective.
 - `status` — canonical async lifecycle status. `completed` is exposed only after
   authoritative Databricks publication; `failed` includes a stable failure
   envelope. The deprecated synchronous compatibility path may still report its
@@ -390,15 +267,15 @@ of inline artifacts the request carries **`upstream_inputs`** — each entry's
 - **`defense-generation`** → the mitigation **rule**: `SELECT result_json FROM
   catalog.schema.table WHERE result_id = key` (using `DATABRICKS_DSN`) and extract
   `primary_candidate.artifact_content` (kind/engine/action derived from it).
-- **`check-generation`** → the **test**: read the same way, then take
-  `result_json.run_result` and feed it to the standalone stimulus converter
-  (`parseStimulus` → `TestBasisFromStimulus`) to build the `test_basis`.
+- **`control-translation`** → the **translated rule**, used only when there is no
+  `defense-generation` entry. Its `primary_candidate` carries no content: the rule
+  is the `artifacts` map entry named by `artifact_id`, and it is verified against
+  its `content_hash` before being reported.
 
-Precedence for the test: an **inline `test_basis` in the request wins**; otherwise
-it is derived from the `check-generation` entry. The resolved rule/test are fed to
-the shared executor, so bring-up / WAF / verdict are identical to the default path.
-A read/parse failure yields `could-not-test` (never a fabricated verdict); a
-missing `defense-generation` entry is `could-not-test` (no rule).
+`defense-generation` keeps precedence when both entries are present. The resolved
+rule is fed to the shared reporting step, so the result shape is identical across
+all input modes. A read, parse or hash failure yields `failed` — a rule is never
+reported unverified — and so does a request with neither entry.
 - Upstream mode is the default; set `DV_INPUT_UPSTREAM=0` to run only the inline
   executor. Both paths require canonical `contract_id: "defense-validation@1.0"`.
 
@@ -421,17 +298,8 @@ editable for manual override). For ACA, set `API_BASE` to the API app's public F
 
 Then stop with `docker compose down` (keep `-v` off to preserve the ledger).
 
-**Requires the host Docker socket.** The API launches the validation-substrate
-container on the host daemon (`/var/run/docker.sock` is mounted) and attaches it
-to the shared `defense-validation-net` network, reaching it by container name — so the
-containerized API can bring up substrates just like the local build.
-
-### Ledger durability
-
-The run ledger is stored on the named volume `ledger-data` (mounted at
-`/app/data`). It **survives `docker stop` and `docker rm`** of the API container —
-recreate the container and past runs reload automatically. Only
-`docker compose down -v` deletes the volume.
+No Docker socket is needed: the API resolves and reports a rule and runs no
+substrate.
 
 ## Run it — local (without Docker for the app itself)
 
@@ -448,13 +316,12 @@ cd ui && python3 -m http.server 5501
 ```
 
 Open http://localhost:5501 and set the "API base URL" field to match the API
-port (e.g. `http://localhost:8137`). In local mode the substrate is published on
-`127.0.0.1:<free-port>` instead of the shared network.
+port (e.g. `http://localhost:8137`).
 
 ## Verify the API directly
 
 ```bash
 curl -s -X POST localhost:8137/v1/defense-validation-runs \
   -H 'Content-Type: application/json' \
-  -d '{"contract_id":"defense-validation@1.0","candidate_artifact_id":"candidate:CVE-123:waf:3","test_basis_id":"test-basis:CVE-123:1","substrate_selector":"waf-nonprod-default","check_profile_id":"defense-validation-profile:waf-http:1"}'
+  -d '{"contract_id":"defense-validation@1.0","candidate_artifact_id":"candidate:CVE-123:waf:3","test_basis_id":"test-basis:CVE-123:1","check_profile_id":"defense-validation-profile:waf-http:1","candidate":{"kind":"waf-rule","rule":"SecRule ARGS \"@rx attack\" \"id:1,deny,status:403\""}}'
 ```

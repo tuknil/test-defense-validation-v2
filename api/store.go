@@ -23,7 +23,6 @@ type RunRecord struct {
 	RunID         string          `json:"run_id"`
 	ResultID      string          `json:"result_id"`
 	TerminalState string          `json:"terminal_state"`
-	Match         bool            `json:"match"`
 	CreatedAt     time.Time       `json:"created_at"`
 	Request       json.RawMessage `json:"request"` // exact submitted payload, immutable
 	Response      RunOutcome      `json:"response"`
@@ -34,7 +33,6 @@ type RunSummary struct {
 	RunID         string    `json:"run_id"`
 	ResultID      string    `json:"result_id"`
 	TerminalState string    `json:"terminal_state"`
-	Match         bool      `json:"match"`
 	CreatedAt     time.Time `json:"created_at"`
 	Summary       string    `json:"summary"`
 }
@@ -78,12 +76,18 @@ func NewRunStore() (*RunStore, error) {
 			_ = db.Close()
 			return nil, fmt.Errorf("rename legacy ledger: %w", err)
 		}
+		// The capability no longer produces a verdict, so the match column has no
+		// meaning. Drop it where an older ledger still carries it.
+		if _, err := db.Exec(
+			`ALTER TABLE IF EXISTS defense_validation_run DROP COLUMN IF EXISTS match`); err != nil {
+			_ = db.Close()
+			return nil, fmt.Errorf("drop verdict column: %w", err)
+		}
 		if _, err := db.Exec(`
 			CREATE TABLE IF NOT EXISTS defense_validation_run (
 				run_id         TEXT        PRIMARY KEY,
 				result_id      TEXT        NOT NULL,
 				terminal_state TEXT        NOT NULL,
-				match          BOOLEAN     NOT NULL,
 				created_at     TIMESTAMPTZ NOT NULL,
 				request        JSONB       NOT NULL,
 				response       JSONB       NOT NULL
@@ -160,9 +164,9 @@ func (s *RunStore) Add(r *RunRecord) error {
 	}
 	_, err = s.db.Exec(`
 		INSERT INTO defense_validation_run
-			(run_id, result_id, terminal_state, match, created_at, request, response)
-		VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-		r.RunID, r.ResultID, r.TerminalState, r.Match, r.CreatedAt,
+			(run_id, result_id, terminal_state, created_at, request, response)
+		VALUES ($1, $2, $3, $4, $5, $6)`,
+		r.RunID, r.ResultID, r.TerminalState, r.CreatedAt,
 		[]byte(r.Request), resp)
 	return err
 }
@@ -174,9 +178,9 @@ func (s *RunStore) Get(id string) (*RunRecord, bool) {
 		response []byte
 	)
 	err := s.db.QueryRow(`
-		SELECT run_id, result_id, terminal_state, match, created_at, request, response
+		SELECT run_id, result_id, terminal_state, created_at, request, response
 		FROM defense_validation_run WHERE run_id = $1`, id).
-		Scan(&rec.RunID, &rec.ResultID, &rec.TerminalState, &rec.Match,
+		Scan(&rec.RunID, &rec.ResultID, &rec.TerminalState,
 			&rec.CreatedAt, &request, &response)
 	if err != nil {
 		return nil, false
@@ -192,7 +196,7 @@ func (s *RunStore) Get(id string) (*RunRecord, bool) {
 // response JSONB's prose_summary field.
 func (s *RunStore) List() []RunSummary {
 	rows, err := s.db.Query(`
-		SELECT run_id, result_id, terminal_state, match, created_at,
+		SELECT run_id, result_id, terminal_state, created_at,
 		       COALESCE(response->>'prose_summary', '')
 		FROM defense_validation_run
 		ORDER BY created_at DESC`)
@@ -205,7 +209,7 @@ func (s *RunStore) List() []RunSummary {
 	out := []RunSummary{}
 	for rows.Next() {
 		var s RunSummary
-		if err := rows.Scan(&s.RunID, &s.ResultID, &s.TerminalState, &s.Match,
+		if err := rows.Scan(&s.RunID, &s.ResultID, &s.TerminalState,
 			&s.CreatedAt, &s.Summary); err != nil {
 			continue
 		}

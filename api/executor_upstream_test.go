@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/json"
 	"testing"
 )
 
@@ -66,59 +65,5 @@ func TestParseUpstreamInputsErrors(t *testing.T) {
 		if _, err := parseUpstreamInputs([]byte(in)); err == nil {
 			t.Errorf("input %q: expected error", in)
 		}
-	}
-}
-
-// End-to-end (minus the DB read): a check-generation result_json.run_result flows
-// through the standalone converter into the expected test_basis.
-func TestCheckGenerationRunResultToTestBasis(t *testing.T) {
-	resultJSON := `{
-      "run_result": {
-        "artifacts": [
-          { "mitigation_checkable_signal": { "stimulus": {
-            "artifact_type": "http-probe",
-            "method": "POST",
-            "path_key": "mcp_stdio_env_config",
-            "headers": { "Content-Type": "application/json" },
-            "json_body": { "env": { "node_options": "--require C:\\temp\\flowise-loader.js" } },
-            "vulnerable_marker": "node_options"
-          } } }
-        ]
-      }
-    }`
-	rr, err := extractRunResult([]byte(resultJSON))
-	if err != nil {
-		t.Fatalf("extractRunResult: %v", err)
-	}
-	stim, err := parseStimulus(rr)
-	if err != nil {
-		t.Fatalf("parseStimulus: %v", err)
-	}
-	tb, err := TestBasisFromStimulus(stim)
-	if err != nil {
-		t.Fatalf("TestBasisFromStimulus: %v", err)
-	}
-	if tb.Request.Method != "POST" || tb.Request.Path != "/mcp_stdio_env_config" {
-		t.Errorf("request wrong: %+v", tb.Request)
-	}
-	wantBody := `{"env":{"node_options":"--require C:\\temp\\flowise-loader.js"}}`
-	if tb.Request.Body != wantBody {
-		t.Errorf("body\n got %q\nwant %q", tb.Request.Body, wantBody)
-	}
-	if tb.Expected.Classification != "true-positive" || tb.Expected.Blocked == nil || !*tb.Expected.Blocked {
-		t.Errorf("expected wrong: %+v", tb.Expected)
-	}
-}
-
-func TestExtractRunResultMissing(t *testing.T) {
-	for _, js := range []string{`{}`, `{"run_result":null}`, `not json`} {
-		if _, err := extractRunResult([]byte(js)); err == nil {
-			t.Errorf("input %q: expected error", js)
-		}
-	}
-	// Ensure a valid run_result marshals back to valid JSON.
-	rr, err := extractRunResult([]byte(`{"run_result":{"a":1}}`))
-	if err != nil || !json.Valid(rr) {
-		t.Errorf("valid run_result failed: %v %s", err, rr)
 	}
 }

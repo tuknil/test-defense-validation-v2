@@ -1,24 +1,31 @@
 # Defense Validation Low-Level Design
 
 **Document ID:** `defense-validation-lld`
-**Version:** `1.1`
-**Updated:** September 3, 2026
+**Version:** `2.0`
+**Updated:** September 24, 2026
 **Capability:** `defense-validation`
 
 ## 1. Scope
 
-The defense-validation service accepts a durable asynchronous run, executes one
-candidate mitigation against one test basis, publishes the canonical result,
-and exposes status and result polling endpoints. An optional callback is a
-wakeup optimization only; PostgreSQL status and result records remain the
-system of record.
+The defense-validation service accepts a durable asynchronous run, resolves one
+defensive control candidate from a verified producer result, publishes the
+canonical result, and exposes status and result polling endpoints. An optional
+callback is a wakeup optimization only; PostgreSQL status and result records
+remain the system of record.
+
+The service produces **no verdict**. It does not execute the rule, send attack or
+benign traffic, or determine whether the rule blocks anything, and the result
+carries no `match`, `expected`, `actual` or `substrate`. Terminal states are
+`rule-resolved`, `failed` and `malfunction`. Pushing the resolved rule to a
+third-party control plane is the next stage of this capability, and any pass/fail
+determination belongs to that plane.
 
 ## 2. Deployable Components
 
 | Component | Responsibility |
 |---|---|
 | Go API | Validates submissions and serves status, result, and cancellation endpoints. |
-| Run worker | Leases queued runs, executes checks, stages results, and commits terminal state. |
+| Run worker | Leases queued runs, resolves the rule, stages results, and commits terminal state. |
 | PostgreSQL | Stores immutable request identity, lifecycle state, canonical result bytes, and callback outbox state. |
 | Callback dispatcher | Leases terminal outbox events and sends authenticated wakeups asynchronously. |
 | Databricks sink | Publishes and verifies immutable completed result rows. |

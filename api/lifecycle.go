@@ -108,7 +108,6 @@ func handleAsyncSubmit(w http.ResponseWriter, r *http.Request) {
 		writeLifecycleError(w, http.StatusBadRequest, "request_identity_mismatch", "request_id, Idempotency-Key, correlation_id, and X-Correlation-ID must align", false)
 		return
 	}
-	normalizeRequestDefaults(&req)
 	if fields := validate(req); len(fields) > 0 {
 		writeLifecycleError(w, http.StatusBadRequest, "invalid_request", "Request does not satisfy defense-validation@1.0: "+strings.Join(fields, ", "), false)
 		return
@@ -164,31 +163,6 @@ func handleAsyncSubmit(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, code, submissionFrom(stored))
 	logLifecycle("run_submitted", stored, map[string]any{"created": created})
-}
-
-func normalizeRequestDefaults(req *SubmitDefenseValidationRequest) {
-	if req.ExecutionMode == "" {
-		req.ExecutionMode = execInMemory
-	}
-	if len(req.TestBasis) == 0 {
-		return
-	}
-	var basis TestBasisSpec
-	if json.Unmarshal(req.TestBasis, &basis) != nil {
-		return
-	}
-	if basis.Request.Method == "" {
-		basis.Request.Method = http.MethodGet
-	}
-	if basis.Request.Path == "" {
-		basis.Request.Path = "/"
-	}
-	if basis.Request.Headers == nil {
-		basis.Request.Headers = map[string]string{}
-	}
-	if normalized, err := json.Marshal(basis); err == nil {
-		req.TestBasis = normalized
-	}
 }
 
 func normalizedRequest(req SubmitDefenseValidationRequest) (json.RawMessage, string, error) {
@@ -328,8 +302,8 @@ func executeDurableRun(ctx context.Context, run DurableRun) (RunOutcome, error) 
 	}
 	ctx, cancel := executionContext(ctx)
 	defer cancel()
-	out := executeRequestedScenario(ctx, req, run.RunID, *run.ResultID)
-	reportExecutionProgress(ctx, "finalizing-result", "Finalizing the canonical mitigation result")
+	out := resolveRequestedRule(ctx, req, run.RunID, *run.ResultID)
+	reportExecutionProgress(ctx, "finalizing-result", "Finalizing the canonical result")
 	out.RequestID = run.RequestID
 	out.RequestSHA256 = run.RequestDigest
 	if len(req.UpstreamInputs) > 0 {
@@ -341,11 +315,11 @@ func executeDurableRun(ctx context.Context, run DurableRun) (RunOutcome, error) 
 	if err := setCanonicalIntegrity(&out); err != nil {
 		return RunOutcome{}, err
 	}
-	reportExecutionProgress(ctx, "result-prepared", "Canonical mitigation result is prepared for publication")
+	reportExecutionProgress(ctx, "result-prepared", "Canonical result is prepared for publication")
 	return out, nil
 }
 
-func executeRequestedScenario(ctx context.Context, req SubmitDefenseValidationRequest, runID, resultID string) RunOutcome {
+func resolveRequestedRule(ctx context.Context, req SubmitDefenseValidationRequest, runID, resultID string) RunOutcome {
 	if v2LocatorMode(req) {
 		return executeSharedContractV2(ctx, req, runID, resultID)
 	}
@@ -355,7 +329,7 @@ func executeRequestedScenario(ctx context.Context, req SubmitDefenseValidationRe
 	if upstreamInputMode && len(req.UpstreamInputs) > 0 {
 		return executeScenarioUpstream(ctx, req, runID, resultID)
 	}
-	return executeScenario(ctx, req, runID, resultID)
+	return reportInlineCandidate(req, runID, resultID)
 }
 
 func setCanonicalIntegrity(out *RunOutcome) error {

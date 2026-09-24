@@ -13,33 +13,6 @@ import (
 	"time"
 )
 
-func TestNormalizedRequestAppliesExecutionDefaults(t *testing.T) {
-	implicit := validLifecycleRequest("request-defaults")
-	implicit.ExecutionMode = ""
-	explicit := validLifecycleRequest("request-defaults")
-	explicit.ExecutionMode = execInMemory
-	var basis TestBasisSpec
-	if err := json.Unmarshal(explicit.TestBasis, &basis); err != nil {
-		t.Fatal(err)
-	}
-	basis.Request.Method = http.MethodGet
-	basis.Request.Path = "/"
-	explicit.TestBasis, _ = json.Marshal(basis)
-	normalizeRequestDefaults(&implicit)
-	normalizeRequestDefaults(&explicit)
-	_, first, err := normalizedRequest(implicit)
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, second, err := normalizedRequest(explicit)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if first != second {
-		t.Fatalf("default-equivalent requests have different digests: %s != %s", first, second)
-	}
-}
-
 func TestCanonicalValidationDoesNotDependOnUpstreamMode(t *testing.T) {
 	previous := upstreamInputMode
 	t.Cleanup(func() { upstreamInputMode = previous })
@@ -116,7 +89,7 @@ func TestEnrichEnvelopeDoesNotFabricateResultReference(t *testing.T) {
 	previous := dbx
 	dbx = nil
 	t.Cleanup(func() { dbx = previous })
-	outcome := RunOutcome{ResultID: resultIDPrefix + "one", TerminalState: stateBlocked}
+	outcome := RunOutcome{ResultID: resultIDPrefix + "one", TerminalState: stateRuleResolved}
 	enrichEnvelope(&outcome, "correlation-1")
 	if outcome.ResultRef != nil {
 		t.Fatalf("fabricated result reference: %+v", outcome.ResultRef)
@@ -682,7 +655,7 @@ func lifecycleOutcome(run DurableRun) RunOutcome {
 	outcome := RunOutcome{
 		Capability: "defense-validation", ContractID: contractID, RequestID: run.RequestID,
 		RunID: run.RunID, ResultID: value(run.ResultID), Status: statusCompleted,
-		TerminalState: stateBlocked, CorrelationID: run.CorrelationID,
+		TerminalState: stateRuleResolved, CorrelationID: run.CorrelationID,
 		ResultRef:    &ResultRef{System: "databricks", Catalog: "catalog", Schema: "defense_validation", Table: "results", Key: value(run.ResultID)},
 		EvidenceRefs: []string{}, CreatedAt: time.Now().UTC(),
 	}

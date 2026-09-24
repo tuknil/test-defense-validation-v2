@@ -1,20 +1,14 @@
 package main
 
 import (
-	"bytes"
 	"context"
-	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
-	"net/http"
 	"net/url"
-	"regexp"
+	"os"
 	"sort"
 	"strings"
-	"time"
 )
 
 const (
@@ -60,19 +54,6 @@ type sharedHTTPBody struct {
 	ContentLength int64                 `json:"content_length,omitempty"`
 	Digest        string                `json:"digest,omitempty"`
 	Content       *sharedContentLocator `json:"content,omitempty"`
-}
-
-type sharedHTTPInput struct {
-	Modality  string            `json:"modality"`
-	Method    string            `json:"method"`
-	Scheme    string            `json:"scheme,omitempty"`
-	Authority string            `json:"authority,omitempty"`
-	Path      string            `json:"path,omitempty"`
-	PathKey   string            `json:"path_key,omitempty"`
-	Query     []sharedHTTPField `json:"query"`
-	Headers   []sharedHTTPField `json:"headers"`
-	Cookies   []sharedHTTPField `json:"cookies"`
-	Body      sharedHTTPBody    `json:"body"`
 }
 
 type sharedSourceMember struct {
@@ -211,48 +192,6 @@ type sharedCandidateBundle struct {
 	} `json:"provenance"`
 }
 
-type HttpRequestTemplateResolution struct {
-	TemplateID            string          `json:"template_id"`
-	PathKey               string          `json:"path_key"`
-	ResolverID            string          `json:"resolver_id"`
-	ProfileID             string          `json:"profile_id"`
-	ResolverProfileDigest string          `json:"resolver_profile_digest"`
-	RenderedRequest       sharedHTTPInput `json:"rendered_request"`
-}
-
-type CaseEvidence struct {
-	Blocked       bool   `json:"blocked,omitempty"`
-	StatusCode    int    `json:"status_code,omitempty"`
-	ReachedApp    bool   `json:"reached_app,omitempty"`
-	MatchedRuleID string `json:"matched_rule_id,omitempty"`
-	Detail        string `json:"detail,omitempty"`
-}
-
-type ObligationCaseResult struct {
-	InputID     string                         `json:"input_id"`
-	Disposition string                         `json:"disposition"`
-	Resolution  *HttpRequestTemplateResolution `json:"resolution,omitempty"`
-	Evidence    *CaseEvidence                  `json:"evidence,omitempty"`
-}
-
-type ObligationResult struct {
-	ObligationID string                 `json:"obligation_id"`
-	CaseResults  []ObligationCaseResult `json:"case_results"`
-}
-
-type CoverageAccounting struct {
-	RequiredObligationCount            int `json:"required_obligation_count"`
-	AccountedObligationCount           int `json:"accounted_obligation_count"`
-	UnaccountedRequiredObligationCount int `json:"unaccounted_required_obligation_count"`
-	SourceMemberCount                  int `json:"source_member_count"`
-	RepresentedSourceMemberCount       int `json:"represented_source_member_count"`
-	UnsupportedSourceMemberCount       int `json:"unsupported_source_member_count"`
-	UnaccountedSourceMemberCount       int `json:"unaccounted_source_member_count"`
-	RequiredWorkItemCount              int `json:"required_work_item_count"`
-	DisposedWorkItemCount              int `json:"disposed_work_item_count"`
-	UnaccountedRequiredWorkItemCount   int `json:"unaccounted_required_work_item_count"`
-}
-
 type AppliedApplicationUnit struct {
 	ApplicationUnitID string   `json:"application_unit_id"`
 	ArtifactIDs       []string `json:"artifact_ids"`
@@ -307,14 +246,11 @@ func validateV2LocatorRequest(req SubmitDefenseValidationRequest) []string {
 	if req.DefenseResult != nil && req.DefenseResult.CorrelationID != req.CorrelationID {
 		bad = append(bad, "defense_result.correlation_id")
 	}
-	if req.CandidateArtifactID != "" || req.TestBasisID != "" || req.CheckProfileID != "" || req.SubstrateSelector != "" || len(req.Substrate) > 0 || len(req.Candidate) > 0 || len(req.TestBasis) > 0 || len(req.UpstreamInputs) > 0 {
+	if req.CandidateArtifactID != "" || req.TestBasisID != "" || req.CheckProfileID != "" || len(req.Candidate) > 0 || len(req.UpstreamInputs) > 0 {
 		bad = append(bad, "inline_content")
 	}
 	if len(req.PrimaryCandidateRaw) > 0 || len(req.AttemptHistory) > 0 || len(req.OutcomeReason) > 0 || len(req.ProofHandoffs) > 0 || len(req.UpstreamResultRef) > 0 || req.ProducedAt != "" || req.UpstreamProse != "" || req.UpstreamResultID != "" || req.UpstreamTerminal != "" {
 		bad = append(bad, "inline_upstream_content")
-	}
-	if req.ExecutionMode != "" && req.ExecutionMode != execInMemory {
-		bad = append(bad, "execution_mode")
 	}
 	return uniqueStrings(bad)
 }
@@ -1019,167 +955,33 @@ func uniqueStrings(values []string) []string {
 }
 
 func executeSharedContractV2(ctx context.Context, req SubmitDefenseValidationRequest, runID, resultID string) RunOutcome {
-	out := RunOutcome{RunID: runID, ResultID: resultID, ProfileID: req.ProfileID, Substrate: SubInfo{Runner: execInMemory, Image: "(shared-contract bounded in-memory WAF)"}}
+	out := RunOutcome{RunID: runID, ResultID: resultID, ProfileID: req.ProfileID}
 	resolver, err := newSharedV2InputResolver()
 	if err != nil {
-		return couldNotTest(out, "shared-contract resolver: "+err.Error())
+		return resolutionFailed(out, "shared-contract resolver: "+err.Error())
 	}
 	defer resolver.Close()
 	resolved, err := resolver.ResolveV2(ctx, *req.DefenseResult, *req.CheckResult)
 	if err != nil {
-		return couldNotTest(out, "shared-contract verification failed: "+err.Error())
+		return resolutionFailed(out, "shared-contract verification failed: "+err.Error())
 	}
-	reportExecutionProgress(ctx, "preparing-application-unit", "Preparing the atomic WAF application unit")
-	waf, applied, err := prepareSharedWAF(resolved.Bundle, resolved.ArtifactBytes, resolved.Semantics)
+	reportExecutionProgress(ctx, "reading-application-unit", "Reading back the complete WAF application unit")
+	cand, applied, err := sharedV2ApplicationUnit(resolved.Bundle, resolved.ArtifactBytes)
 	if err != nil {
-		return couldNotTest(out, "atomic application unit rejected: "+err.Error())
+		return resolutionFailed(out, "application unit rejected: "+err.Error())
 	}
+
+	out = reportResolvedRule(out, cand, "shared-contract v2",
+		"the verified application unit "+applied.ApplicationUnitID, os.Stdout)
 	out.ApplicationUnit = &applied
 	out.InputProvenance = &resolved.Provenance
 	out.EvidenceRefs = append([]string{}, resolved.EvidenceRefs...)
-	reportExecutionProgress(ctx, "starting-validation-substrate", "Starting the bounded validation substrate")
-	sb, reason := bringUpInMemorySubstrate(ctx, &out, SubstrateSpec{Image: out.Substrate.Image}, runID)
-	if reason != "" {
-		return couldNotTest(out, reason)
-	}
-	defer sb.cleanup()
-	if err := waitReady(ctx, sb.base, 10*time.Second); err != nil {
-		return couldNotTest(out, "substrate did not become ready: "+err.Error())
-	}
-	out.Substrate.Ready = true
-	inputs := map[string]sharedTestInput{}
-	for _, input := range resolved.Semantics.TestInputs {
-		inputs[input.InputID] = input
-	}
-	blocked, notBlocked, safety, unsupported := 0, 0, 0, 0
-	totalCases := 0
-	for _, obligation := range resolved.Semantics.Obligations {
-		totalCases += len(obligation.RequiredInputRefs)
-	}
-	executedCases := 0
-	for _, obligation := range resolved.Semantics.Obligations {
-		result := ObligationResult{ObligationID: obligation.ObligationID, CaseResults: make([]ObligationCaseResult, 0, len(obligation.RequiredInputRefs))}
-		for _, ref := range obligation.RequiredInputRefs {
-			executedCases++
-			reportExecutionProgress(ctx, "executing-obligations", fmt.Sprintf("Executing obligation case %d of %d", executedCases, totalCases))
-			caseResult := executeSharedCase(ctx, sb.base, inputs[ref.ID], resolved.CGDocument, req.ProfileID, waf)
-			switch caseResult.Disposition {
-			case "blocked":
-				blocked++
-			case "not-blocked":
-				notBlocked++
-			case "safety-stop":
-				safety++
-			case "unsupported":
-				unsupported++
-			}
-			result.CaseResults = append(result.CaseResults, caseResult)
-		}
-		out.ObligationResults = append(out.ObligationResults, result)
-	}
-	represented := map[string]bool{}
-	unsupportedMembers := map[string]bool{}
-	for _, input := range resolved.Semantics.TestInputs {
-		for _, ref := range input.SourceMemberRefs {
-			represented[ref.ID] = true
-		}
-	}
-	for _, dimension := range resolved.Semantics.UnsupportedDimensions {
-		for _, ref := range dimension.SourceMemberRefs {
-			unsupportedMembers[ref.ID] = true
-		}
-	}
-	work := blocked + notBlocked + safety + unsupported
-	out.Accounting = &CoverageAccounting{RequiredObligationCount: len(resolved.Semantics.Obligations), AccountedObligationCount: len(out.ObligationResults), SourceMemberCount: len(resolved.Semantics.SourceBinding.Members), RepresentedSourceMemberCount: len(represented), UnsupportedSourceMemberCount: len(unsupportedMembers), RequiredWorkItemCount: work, DisposedWorkItemCount: work}
-	reportExecutionProgress(ctx, "validating-accounting", "Validating complete obligation and source accounting")
-	if err := validateSharedOutcomeAccounting(resolved.Semantics, out.ObligationResults, *out.Accounting); err != nil {
-		out.TerminalState = stateMalfunction
-		out.Actual.Detail = "shared-contract accounting invariant failed: " + err.Error()
-		out.ProseSummary = "Could not persist an incompletely accounted shared-contract result."
-		return out
-	}
-	reportExecutionProgress(ctx, "accounting-validated", "Complete obligation and source accounting is valid")
-	if safety > 0 || unsupported > 0 {
-		out.TerminalState = stateCouldNotTest
-	} else if notBlocked > 0 {
-		out.TerminalState = stateNotBlocked
-	} else {
-		out.TerminalState = stateBlocked
-	}
-	out.Actual.Blocked = out.TerminalState == stateBlocked
-	out.Actual.Detail = fmt.Sprintf("shared-contract cases: blocked=%d not-blocked=%d safety-stop=%d unsupported=%d", blocked, notBlocked, safety, unsupported)
-	out.Match = notBlocked == 0 && safety == 0 && unsupported == 0
-	out.ProseSummary = "Applied the complete DG application unit atomically and disposed every required CG obligation/input assignment."
-	out.Steps = []string{"authenticated compact CG and DG locators", "verified embedded semantics and complete candidate bundle", "applied and read back complete application unit", "executed every required supported HTTP assignment", "assembled zero-unaccounted coverage accounting"}
+	out.Steps = append([]string{
+		"authenticated compact CG and DG locators",
+		"verified embedded semantics and complete candidate bundle",
+		"read back the complete application unit",
+	}, out.Steps...)
 	return out
-}
-
-func validateSharedOutcomeAccounting(semantics sharedSemantics, results []ObligationResult, accounting CoverageAccounting) error {
-	expected := map[string]map[string]bool{}
-	for _, obligation := range semantics.Obligations {
-		inputs := map[string]bool{}
-		for _, ref := range obligation.RequiredInputRefs {
-			if inputs[ref.ID] {
-				return errors.New("duplicate expected work item")
-			}
-			inputs[ref.ID] = true
-		}
-		expected[obligation.ObligationID] = inputs
-	}
-	disposed, seenObligations := 0, map[string]bool{}
-	for _, result := range results {
-		inputs, ok := expected[result.ObligationID]
-		if !ok || seenObligations[result.ObligationID] {
-			return errors.New("omitted, invented, or duplicate obligation result")
-		}
-		seenObligations[result.ObligationID] = true
-		seenInputs := map[string]bool{}
-		for _, item := range result.CaseResults {
-			if !inputs[item.InputID] || seenInputs[item.InputID] {
-				return errors.New("omitted, invented, or duplicate case result")
-			}
-			if item.Disposition != "blocked" && item.Disposition != "not-blocked" && item.Disposition != "safety-stop" && item.Disposition != "unsupported" {
-				return errors.New("case disposition is invalid")
-			}
-			seenInputs[item.InputID] = true
-			disposed++
-		}
-		if len(seenInputs) != len(inputs) {
-			return errors.New("required case result is omitted")
-		}
-	}
-	represented, unsupportedMembers := map[string]bool{}, map[string]bool{}
-	for _, input := range semantics.TestInputs {
-		for _, ref := range input.SourceMemberRefs {
-			represented[ref.ID] = true
-		}
-	}
-	for _, dimension := range semantics.UnsupportedDimensions {
-		for _, ref := range dimension.SourceMemberRefs {
-			unsupportedMembers[ref.ID] = true
-		}
-	}
-	requiredWork := 0
-	for _, inputs := range expected {
-		requiredWork += len(inputs)
-	}
-	if len(seenObligations) != len(expected) || accounting.RequiredObligationCount != len(expected) || accounting.AccountedObligationCount != len(results) || accounting.UnaccountedRequiredObligationCount != 0 || accounting.SourceMemberCount != len(semantics.SourceBinding.Members) || accounting.RepresentedSourceMemberCount != len(represented) || accounting.UnsupportedSourceMemberCount != len(unsupportedMembers) || accounting.UnaccountedSourceMemberCount != 0 || accounting.RequiredWorkItemCount != requiredWork || accounting.DisposedWorkItemCount != disposed || accounting.UnaccountedRequiredWorkItemCount != 0 {
-		return errors.New("coverage accounting count relationship differs")
-	}
-	if intersectsLocal(represented, unsupportedMembers) || len(represented)+len(unsupportedMembers) != accounting.SourceMemberCount {
-		return errors.New("source accounting partition differs")
-	}
-	return nil
-}
-
-type sharedPreparedWAF struct {
-	rules        map[string]sharedPreparedRule
-	alternatives []sharedPreparedAlternative
-}
-type sharedPreparedRule struct {
-	ID, Carrier, Name string
-	Pattern           *regexp.Regexp
-	Transformations   []string
 }
 
 type sharedRuleDocument struct {
@@ -1190,20 +992,19 @@ type sharedRuleDocument struct {
 	RouteAlternatives    []sharedRouteAlternative `json:"route_bound_alternatives,omitempty"`
 	Rules                []sharedRuleDefinition   `json:"rules"`
 }
-type sharedPreparedAlternative struct {
-	ComponentIDs []string
-	Route        *sharedRouteBinding
-}
+
 type sharedRouteAlternative struct {
 	AlternativeID     string                        `json:"alternative_id"`
 	ComponentIDs      []string                      `json:"component_ids"`
 	ComponentBindings []sharedRouteComponentBinding `json:"component_bindings"`
 	Route             sharedRouteBinding            `json:"route"`
 }
+
 type sharedRouteComponentBinding struct {
 	ComponentID string           `json:"component_id"`
 	InputRefs   []sharedTypedRef `json:"input_refs"`
 }
+
 type sharedRouteBinding struct {
 	Kind      string `json:"kind"`
 	Method    string `json:"method"`
@@ -1212,6 +1013,7 @@ type sharedRouteBinding struct {
 	Authority string `json:"authority,omitempty"`
 	Path      string `json:"path,omitempty"`
 }
+
 type sharedRuleDefinition struct {
 	RuleID          string   `json:"rule_id"`
 	ComponentID     string   `json:"component_id"`
@@ -1221,167 +1023,16 @@ type sharedRuleDefinition struct {
 	Flags           []string `json:"flags"`
 	Transformations []string `json:"transformations"`
 }
+
 type sharedCarrierDocument struct {
 	RuleSetID       string                 `json:"rule_set_id"`
 	CarrierBindings []sharedCarrierBinding `json:"carrier_bindings"`
 }
+
 type sharedCarrierBinding struct {
 	ComponentID string `json:"component_id"`
 	Carrier     string `json:"carrier"`
 	Name        string `json:"name"`
-}
-
-func prepareSharedWAF(bundle sharedCandidateBundle, contents map[string][]byte, semantics sharedSemantics) (sharedPreparedWAF, AppliedApplicationUnit, error) {
-	if len(bundle.ApplicationUnit.ArtifactRefs) != len(contents) {
-		return sharedPreparedWAF{}, AppliedApplicationUnit{}, errors.New("application unit/content count differs")
-	}
-	var main sharedRuleDocument
-	var carriers sharedCarrierDocument
-	foundMain, foundCarriers := false, false
-	for _, artifact := range bundle.PrimaryCandidate.Artifacts {
-		content := contents[artifact.ArtifactID]
-		switch artifact.Kind {
-		case "match-rule":
-			if foundMain || decodeStrictLoose(content, &main) != nil {
-				return sharedPreparedWAF{}, AppliedApplicationUnit{}, errors.New("match-rule artifact is invalid")
-			}
-			foundMain = true
-		case "configuration-fragment":
-			if foundCarriers || decodeStrictLoose(content, &carriers) != nil {
-				return sharedPreparedWAF{}, AppliedApplicationUnit{}, errors.New("carrier artifact is invalid")
-			}
-			foundCarriers = true
-		default:
-			return sharedPreparedWAF{}, AppliedApplicationUnit{}, fmt.Errorf("unsupported application artifact kind %q", artifact.Kind)
-		}
-	}
-	if !foundMain || !foundCarriers || main.Action != "block" || main.RuleSetID == "" || main.RuleSetID != carriers.RuleSetID || len(main.Rules) == 0 || len(main.Rules) != len(carriers.CarrierBindings) {
-		return sharedPreparedWAF{}, AppliedApplicationUnit{}, errors.New("complete WAF artifact set does not read back")
-	}
-	bindings := map[string]string{}
-	for _, binding := range carriers.CarrierBindings {
-		key := binding.ComponentID + "\x00" + binding.Carrier + "\x00" + strings.ToLower(binding.Name)
-		if bindings[key] != "" {
-			return sharedPreparedWAF{}, AppliedApplicationUnit{}, errors.New("duplicate carrier binding")
-		}
-		bindings[key] = key
-	}
-	prepared := sharedPreparedWAF{rules: map[string]sharedPreparedRule{}}
-	for _, rule := range main.Rules {
-		key := rule.ComponentID + "\x00" + rule.Carrier + "\x00" + strings.ToLower(rule.Name)
-		if bindings[key] == "" || prepared.rules[rule.ComponentID].ID != "" {
-			return sharedPreparedWAF{}, AppliedApplicationUnit{}, errors.New("rule/carrier binding differs")
-		}
-		prefix := ""
-		for _, flag := range rule.Flags {
-			if !strings.Contains("ims", flag) && flag != "u" {
-				return sharedPreparedWAF{}, AppliedApplicationUnit{}, errors.New("unsupported rule flag")
-			}
-			if flag != "u" {
-				prefix += flag
-			}
-		}
-		pattern := rule.Pattern
-		if prefix != "" {
-			pattern = "(?" + prefix + ")" + pattern
-		}
-		compiled, err := regexp.Compile(pattern)
-		if err != nil {
-			return sharedPreparedWAF{}, AppliedApplicationUnit{}, err
-		}
-		for _, transform := range rule.Transformations {
-			if transform != "urlDecode" && transform != "base64Decode" && transform != "hexDecode" && transform != "lowercase" {
-				return sharedPreparedWAF{}, AppliedApplicationUnit{}, fmt.Errorf("unsupported WAF transformation %q", transform)
-			}
-		}
-		prepared.rules[rule.ComponentID] = sharedPreparedRule{rule.RuleID, rule.Carrier, rule.Name, compiled, rule.Transformations}
-	}
-	if main.PlacementMode == "route-bound-v1" {
-		if len(main.RouteAlternatives) == 0 {
-			return sharedPreparedWAF{}, AppliedApplicationUnit{}, errors.New("route-bound placement has no alternatives")
-		}
-		coverage := map[string]bool{}
-		for _, alternative := range main.CoverageAlternatives {
-			coverage[strings.Join(alternative, "\x00")] = true
-		}
-		seen := map[string]bool{}
-		representedCoverage := map[string]bool{}
-		semanticInputs := map[string]sharedRouteBinding{}
-		for _, input := range semantics.TestInputs {
-			if route, ok := sharedInputRoute(input.Input); ok {
-				semanticInputs[input.InputID] = route
-			}
-		}
-		semanticComponents := map[string][]sharedTypedRef{}
-		for _, component := range semantics.Components {
-			componentID := stringValue(component["component_id"])
-			encoded, _ := json.Marshal(component["input_refs"])
-			var refs []sharedTypedRef
-			if componentID == "" || json.Unmarshal(encoded, &refs) != nil {
-				return sharedPreparedWAF{}, AppliedApplicationUnit{}, errors.New("authenticated component input ancestry is invalid")
-			}
-			semanticComponents[componentID] = refs
-		}
-		for _, alternative := range main.RouteAlternatives {
-			if alternative.AlternativeID == "" || seen[alternative.AlternativeID] || !coverage[strings.Join(alternative.ComponentIDs, "\x00")] || !validSharedRouteBinding(alternative.Route) {
-				return sharedPreparedWAF{}, AppliedApplicationUnit{}, errors.New("route-bound alternative is invalid")
-			}
-			seen[alternative.AlternativeID] = true
-			representedCoverage[strings.Join(alternative.ComponentIDs, "\x00")] = true
-			bindings := map[string][]sharedTypedRef{}
-			for _, binding := range alternative.ComponentBindings {
-				if binding.ComponentID == "" || bindings[binding.ComponentID] != nil {
-					return sharedPreparedWAF{}, AppliedApplicationUnit{}, errors.New("route component binding is duplicated")
-				}
-				bindings[binding.ComponentID] = binding.InputRefs
-			}
-			if len(bindings) != len(alternative.ComponentIDs) {
-				return sharedPreparedWAF{}, AppliedApplicationUnit{}, errors.New("route component binding set is incomplete")
-			}
-			for _, componentID := range alternative.ComponentIDs {
-				expected := []sharedTypedRef{}
-				for _, ref := range semanticComponents[componentID] {
-					if route, ok := semanticInputs[ref.ID]; ok && route == alternative.Route {
-						expected = append(expected, ref)
-					}
-				}
-				if !sameSharedTypedRefs(bindings[componentID], expected) || len(expected) == 0 {
-					return sharedPreparedWAF{}, AppliedApplicationUnit{}, errors.New("route binding differs from authenticated CG input ancestry")
-				}
-			}
-			route := alternative.Route
-			prepared.alternatives = append(prepared.alternatives, sharedPreparedAlternative{append([]string{}, alternative.ComponentIDs...), &route})
-		}
-		if len(representedCoverage) != len(coverage) {
-			return sharedPreparedWAF{}, AppliedApplicationUnit{}, errors.New("route-bound alternatives do not cover every Boolean alternative")
-		}
-	} else if main.PlacementMode == "" {
-		for _, alternative := range main.CoverageAlternatives {
-			prepared.alternatives = append(prepared.alternatives, sharedPreparedAlternative{ComponentIDs: append([]string{}, alternative...)})
-		}
-	} else {
-		return sharedPreparedWAF{}, AppliedApplicationUnit{}, errors.New("unknown WAF placement mode")
-	}
-	if len(prepared.alternatives) == 0 {
-		for _, rule := range main.Rules {
-			prepared.alternatives = append(prepared.alternatives, sharedPreparedAlternative{ComponentIDs: []string{rule.ComponentID}})
-		}
-	}
-	for _, alternative := range prepared.alternatives {
-		if len(alternative.ComponentIDs) == 0 {
-			return sharedPreparedWAF{}, AppliedApplicationUnit{}, errors.New("empty coverage alternative")
-		}
-		for _, id := range alternative.ComponentIDs {
-			if prepared.rules[id].ID == "" {
-				return sharedPreparedWAF{}, AppliedApplicationUnit{}, errors.New("coverage alternative references unknown rule")
-			}
-		}
-	}
-	ids := make([]string, 0, len(bundle.ApplicationUnit.ArtifactRefs))
-	for _, ref := range bundle.ApplicationUnit.ArtifactRefs {
-		ids = append(ids, ref.ID)
-	}
-	return prepared, AppliedApplicationUnit{bundle.ApplicationUnit.ApplicationUnitID, ids, true}, nil
 }
 
 func decodeStrictLoose(content []byte, target any) error {
@@ -1394,130 +1045,6 @@ func decodeStrictLoose(content []byte, target any) error {
 		return err
 	}
 	return json.Unmarshal(encoded, target)
-}
-
-func executeSharedCase(ctx context.Context, base string, input sharedTestInput, enclosing map[string]any, profileID string, waf sharedPreparedWAF) ObligationCaseResult {
-	result := ObligationCaseResult{InputID: input.InputID}
-	modality := stringValue(input.Input["modality"])
-	if modality != "http-request" && modality != "http-request-template" {
-		result.Disposition = "unsupported"
-		result.Evidence = &CaseEvidence{Detail: "WAF-first slice does not execute modality " + modality}
-		return result
-	}
-	encoded, _ := json.Marshal(input.Input)
-	var request sharedHTTPInput
-	if err := json.Unmarshal(encoded, &request); err != nil {
-		result.Disposition = "safety-stop"
-		result.Evidence = &CaseEvidence{Detail: err.Error()}
-		return result
-	}
-	route := sharedRouteBinding{Kind: "rendered-http-route", Method: request.Method, Scheme: request.Scheme, Authority: request.Authority, Path: request.Path}
-	if modality == "http-request-template" {
-		route = sharedRouteBinding{Kind: "opaque-path-key", Method: request.Method, PathKey: request.PathKey}
-		resolution, err := resolveSharedTemplate(input.InputID, request, profileID)
-		if err != nil {
-			result.Disposition = "safety-stop"
-			result.Evidence = &CaseEvidence{Detail: err.Error()}
-			return result
-		}
-		result.Resolution = &resolution
-		request = resolution.RenderedRequest
-	}
-	body, err := resolveSharedBody(request.Body, enclosing)
-	if err != nil {
-		result.Disposition = "safety-stop"
-		result.Evidence = &CaseEvidence{Detail: err.Error()}
-		return result
-	}
-	matched, ruleID, err := waf.evaluate(route, request, body)
-	if err != nil {
-		result.Disposition = "safety-stop"
-		result.Evidence = &CaseEvidence{Detail: err.Error()}
-		return result
-	}
-	if matched {
-		result.Disposition = "blocked"
-		result.Evidence = &CaseEvidence{Blocked: true, StatusCode: 403, MatchedRuleID: ruleID, Detail: "complete WAF application unit matched"}
-		return result
-	}
-	status, _, err := forwardShared(ctx, base, request, body)
-	if err != nil {
-		result.Disposition = "safety-stop"
-		result.Evidence = &CaseEvidence{Detail: err.Error()}
-		return result
-	}
-	result.Disposition = "not-blocked"
-	result.Evidence = &CaseEvidence{StatusCode: status, ReachedApp: true, Detail: "request reached bounded substrate"}
-	return result
-}
-
-func resolveSharedTemplate(inputID string, template sharedHTTPInput, profileID string) (HttpRequestTemplateResolution, error) {
-	if embeddedRouteProfileErr != nil {
-		return HttpRequestTemplateResolution{}, fmt.Errorf("route profile integrity: %w", embeddedRouteProfileErr)
-	}
-	profile, ok := embeddedRouteProfiles[profileID]
-	if !ok {
-		return HttpRequestTemplateResolution{}, errors.New("unknown route profile")
-	}
-	if template.Modality != "http-request-template" {
-		return HttpRequestTemplateResolution{}, errors.New("route adapter accepts only http-request-template")
-	}
-	route, ok := profile.Routes[template.PathKey]
-	if !ok {
-		return HttpRequestTemplateResolution{}, errors.New("unknown path_key")
-	}
-	rendered := template
-	rendered.Modality = "http-request"
-	rendered.PathKey = ""
-	rendered.Scheme = route.Scheme
-	rendered.Authority = route.Authority
-	rendered.Path = route.Path
-	if err := verifyTemplateOwnedFields(template, rendered); err != nil {
-		return HttpRequestTemplateResolution{}, err
-	}
-	return HttpRequestTemplateResolution{inputID, template.PathKey, profile.ResolverID, profileID, profile.Digest, rendered}, nil
-}
-
-func verifyTemplateOwnedFields(template, rendered sharedHTTPInput) error {
-	if rendered.Method != template.Method || !equalHTTPFields(rendered.Query, template.Query) || !equalHTTPFields(rendered.Headers, template.Headers) || !equalHTTPFields(rendered.Cookies, template.Cookies) || rendered.Body != template.Body {
-		return errors.New("route adapter changed template-owned fields")
-	}
-	return nil
-}
-func equalHTTPFields(a, b []sharedHTTPField) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
-}
-
-func resolveSharedBody(body sharedHTTPBody, enclosing map[string]any) ([]byte, error) {
-	switch body.State {
-	case "absent":
-		return nil, nil
-	case "empty":
-		decoded, err := base64.StdEncoding.Strict().DecodeString(body.ContentBase64)
-		if err != nil || len(decoded) != 0 || body.ContentLength != 0 || body.Digest != sha256Value(nil) {
-			return nil, errors.New("empty body metadata differs")
-		}
-		return []byte{}, nil
-	case "present":
-		if body.Content == nil || body.ContentLength < 1 {
-			return nil, errors.New("present body locator is absent")
-		}
-		content, err := resolveSharedInternalLocator(*body.Content, enclosing)
-		if err != nil || int64(len(content)) != body.ContentLength {
-			return nil, errors.New("present body locator/content differs")
-		}
-		return content, nil
-	default:
-		return nil, errors.New("unknown body state")
-	}
 }
 
 func resolveSharedInternalLocator(locator sharedContentLocator, enclosing map[string]any) ([]byte, error) {
@@ -1578,210 +1105,80 @@ func resolveSharedJSONPointer(root any, pointer string) (any, error) {
 	return current, nil
 }
 
-func validSharedRouteBinding(route sharedRouteBinding) bool {
-	if route.Method == "" {
-		return false
+// sharedV2ApplicationUnit verifies that the resolved artifact set reads back as a
+// complete, self-consistent application unit and returns the rule it carries.
+//
+// This is the readback check only: that a match-rule and a carrier-configuration
+// artifact are both present, agree on their rule set, and cover the same rules.
+// Nothing is compiled and no traffic is matched — the rule document's own bytes
+// are what gets reported, and later pushed.
+func sharedV2ApplicationUnit(bundle sharedCandidateBundle, contents map[string][]byte) (CandidateSpec, AppliedApplicationUnit, error) {
+	if len(bundle.ApplicationUnit.ArtifactRefs) != len(contents) {
+		return CandidateSpec{}, AppliedApplicationUnit{}, errors.New("application unit/content count differs")
 	}
-	if route.Kind == "opaque-path-key" {
-		return route.PathKey != "" && route.Path == "" && route.Scheme == "" && route.Authority == ""
-	}
-	return route.Kind == "rendered-http-route" && route.Path != "" && route.PathKey == ""
-}
-
-func sharedInputRoute(input map[string]any) (sharedRouteBinding, bool) {
-	modality := stringValue(input["modality"])
-	method := stringValue(input["method"])
-	if modality == "http-request-template" {
-		route := sharedRouteBinding{Kind: "opaque-path-key", Method: method, PathKey: stringValue(input["path_key"])}
-		return route, validSharedRouteBinding(route)
-	}
-	if modality == "http-request" {
-		route := sharedRouteBinding{Kind: "rendered-http-route", Method: method, Scheme: stringValue(input["scheme"]), Authority: stringValue(input["authority"]), Path: stringValue(input["path"])}
-		return route, validSharedRouteBinding(route)
-	}
-	return sharedRouteBinding{}, false
-}
-
-func sameSharedTypedRefs(left, right []sharedTypedRef) bool {
-	if len(left) != len(right) {
-		return false
-	}
-	for index := range left {
-		if left[index] != right[index] {
-			return false
-		}
-	}
-	return true
-}
-
-func sharedRouteApplies(bound, actual sharedRouteBinding) bool {
-	if bound.Kind != actual.Kind || bound.Method != actual.Method {
-		return false
-	}
-	if bound.Kind == "opaque-path-key" {
-		return bound.PathKey == actual.PathKey
-	}
-	return bound.Scheme == actual.Scheme && bound.Authority == actual.Authority && bound.Path == actual.Path
-}
-
-func (w sharedPreparedWAF) evaluate(route sharedRouteBinding, request sharedHTTPInput, body []byte) (bool, string, error) {
-	var evaluationErr error
-	for _, alternative := range w.alternatives {
-		if alternative.Route != nil && !sharedRouteApplies(*alternative.Route, route) {
-			continue
-		}
-		matched := true
-		last := ""
-		for _, id := range alternative.ComponentIDs {
-			rule := w.rules[id]
-			values, err := sharedCarrierValues(rule, request, body)
-			if err != nil {
-				if evaluationErr == nil {
-					evaluationErr = err
-				}
-				matched = false
-				break
+	var (
+		main        sharedRuleDocument
+		carriers    sharedCarrierDocument
+		mainBytes   []byte
+		foundMain   bool
+		foundCarry  bool
+		artifactIDs []string
+	)
+	for _, artifact := range bundle.PrimaryCandidate.Artifacts {
+		content := contents[artifact.ArtifactID]
+		artifactIDs = append(artifactIDs, artifact.ArtifactID)
+		switch artifact.Kind {
+		case "match-rule":
+			if foundMain || decodeStrictLoose(content, &main) != nil {
+				return CandidateSpec{}, AppliedApplicationUnit{}, errors.New("match-rule artifact is invalid")
 			}
-			ruleMatched := false
-			for _, value := range values {
-				transformed, err := applySharedWAFTransforms([]byte(value), rule.Transformations)
-				if err != nil {
-					return false, "", err
-				}
-				if rule.Pattern.Match(transformed) {
-					ruleMatched = true
-					last = rule.ID
-					break
-				}
+			foundMain, mainBytes = true, content
+		case "configuration-fragment":
+			if foundCarry || decodeStrictLoose(content, &carriers) != nil {
+				return CandidateSpec{}, AppliedApplicationUnit{}, errors.New("carrier artifact is invalid")
 			}
-			if !ruleMatched {
-				matched = false
-				break
-			}
-		}
-		if matched {
-			return true, last, nil
-		}
-	}
-	if evaluationErr != nil {
-		return false, "", evaluationErr
-	}
-	return false, "", nil
-}
-func sharedCarrierValues(rule sharedPreparedRule, request sharedHTTPInput, body []byte) ([]string, error) {
-	switch rule.Carrier {
-	case "query":
-		return namedHTTPValues(request.Query, rule.Name), nil
-	case "header":
-		return namedHTTPValuesFold(request.Headers, rule.Name), nil
-	case "cookie":
-		return namedHTTPValues(request.Cookies, rule.Name), nil
-	case "body":
-		if rule.Name == "" {
-			return []string{string(body)}, nil
-		}
-		var document any
-		if err := decodeStrictJSON(body, &document); err != nil {
-			return nil, fmt.Errorf("decode structured body: %w", err)
-		}
-		value, err := resolveSharedJSONPointer(document, rule.Name)
-		if err != nil {
-			if errors.Is(err, errSharedJSONPointerMemberAbsent) || errors.Is(err, errSharedJSONPointerIndexInvalid) {
-				return nil, nil
-			}
-			return nil, fmt.Errorf("resolve structured body selector: %w", err)
-		}
-		text, ok := value.(string)
-		if !ok {
-			return nil, nil
-		}
-		return []string{text}, nil
-	case "path":
-		return []string{request.Path}, nil
-	case "method":
-		return []string{request.Method}, nil
-	default:
-		return nil, nil
-	}
-}
-func namedHTTPValues(fields []sharedHTTPField, name string) []string {
-	out := []string{}
-	for _, field := range fields {
-		if field.Name == name {
-			out = append(out, field.Value)
-		}
-	}
-	return out
-}
-func namedHTTPValuesFold(fields []sharedHTTPField, name string) []string {
-	out := []string{}
-	for _, field := range fields {
-		if strings.EqualFold(field.Name, name) {
-			out = append(out, field.Value)
-		}
-	}
-	return out
-}
-func applySharedWAFTransforms(value []byte, transforms []string) ([]byte, error) {
-	out := append([]byte{}, value...)
-	for _, transform := range transforms {
-		switch transform {
-		case "urlDecode":
-			decoded, err := url.PathUnescape(string(out))
-			if err != nil {
-				return nil, err
-			}
-			out = []byte(decoded)
-		case "base64Decode":
-			decoded, err := base64.StdEncoding.Strict().DecodeString(string(out))
-			if err != nil {
-				return nil, err
-			}
-			out = decoded
-		case "hexDecode":
-			decoded, err := hex.DecodeString(string(out))
-			if err != nil {
-				return nil, err
-			}
-			out = decoded
-		case "lowercase":
-			out = []byte(strings.ToLower(string(out)))
+			foundCarry = true
 		default:
-			return nil, errors.New("unknown candidate transformation")
+			return CandidateSpec{}, AppliedApplicationUnit{}, fmt.Errorf("unsupported application artifact kind %q", artifact.Kind)
 		}
 	}
-	return out, nil
-}
+	if !foundMain || !foundCarry || main.Action != "block" || main.RuleSetID == "" ||
+		main.RuleSetID != carriers.RuleSetID || len(main.Rules) == 0 ||
+		len(main.Rules) != len(carriers.CarrierBindings) {
+		return CandidateSpec{}, AppliedApplicationUnit{}, errors.New("complete WAF artifact set does not read back")
+	}
+	// Every rule must have exactly one matching carrier binding, or the unit is not
+	// the complete set the producer attested to.
+	bindings := map[string]bool{}
+	for _, binding := range carriers.CarrierBindings {
+		key := binding.ComponentID + "\x00" + binding.Carrier + "\x00" + strings.ToLower(binding.Name)
+		if bindings[key] {
+			return CandidateSpec{}, AppliedApplicationUnit{}, errors.New("duplicate carrier binding")
+		}
+		bindings[key] = true
+	}
+	for _, rule := range main.Rules {
+		key := rule.ComponentID + "\x00" + rule.Carrier + "\x00" + strings.ToLower(rule.Name)
+		if !bindings[key] {
+			return CandidateSpec{}, AppliedApplicationUnit{}, errors.New("rule/carrier binding differs")
+		}
+	}
 
-func forwardShared(ctx context.Context, base string, request sharedHTTPInput, body []byte) (int, string, error) {
-	values := url.Values{}
-	for _, field := range request.Query {
-		values.Add(field.Name, field.Value)
+	sort.Strings(artifactIDs)
+	cand := CandidateSpec{
+		Kind:   "waf-rule",
+		Engine: "janus-waf-rule-set",
+		RuleID: bundle.PrimaryCandidate.CandidateID,
+		Rule:   string(mainBytes),
+		Action: main.Action,
 	}
-	target := base + request.Path
-	if encoded := values.Encode(); encoded != "" {
-		target += "?" + encoded
+	if class := strings.ToLower(strings.TrimSpace(bundle.PrimaryCandidate.SelectedControlClass)); class == "firewall" {
+		cand.Kind = "firewall-rule"
 	}
-	var reader io.Reader
-	if request.Body.State != "absent" {
-		reader = bytes.NewReader(body)
+	applied := AppliedApplicationUnit{
+		ApplicationUnitID: bundle.ApplicationUnit.ApplicationUnitID,
+		ArtifactIDs:       artifactIDs,
+		ReadbackVerified:  true,
 	}
-	httpRequest, err := http.NewRequestWithContext(ctx, request.Method, target, reader)
-	if err != nil {
-		return 0, "", err
-	}
-	for _, field := range request.Headers {
-		httpRequest.Header.Add(field.Name, field.Value)
-	}
-	for _, cookie := range request.Cookies {
-		httpRequest.AddCookie(&http.Cookie{Name: cookie.Name, Value: cookie.Value})
-	}
-	client := &http.Client{Timeout: 10 * time.Second}
-	response, err := client.Do(httpRequest)
-	if err != nil {
-		return 0, "", err
-	}
-	defer response.Body.Close()
-	responseBody, _ := io.ReadAll(io.LimitReader(response.Body, 512))
-	return response.StatusCode, string(responseBody), nil
+	return cand, applied, nil
 }

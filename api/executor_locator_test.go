@@ -84,7 +84,7 @@ func locatorFixture(t *testing.T, volume bool) (*databricksLocatorResolver, Immu
 	return &databricksLocatorResolver{source: source}, defenseLocator, checkLocator, source
 }
 
-func TestLocatorResolutionHydratesVolumeAndUsesRegisteredHTTPSelection(t *testing.T) {
+func TestLocatorResolutionHydratesVolumeAndVerifiesBothLocators(t *testing.T) {
 	resolver, defense, check, source := locatorFixture(t, true)
 	resolved, err := resolver.Resolve(context.Background(), defense, check, "check-artifact:http")
 	if err != nil {
@@ -93,11 +93,8 @@ func TestLocatorResolutionHydratesVolumeAndUsesRegisteredHTTPSelection(t *testin
 	if len(source.volumePaths) != 1 || !strings.HasPrefix(source.volumePaths[0], "/Volumes/36889_janus_dev/check_generation/payloads/sha256/") {
 		t.Fatalf("Volume paths = %v", source.volumePaths)
 	}
-	if resolved.Candidate.RuleID != "candidate-1" || resolved.Provenance.SelectedTestBasisID != "check-artifact:http" {
-		t.Fatalf("resolved provenance = %+v candidate=%+v", resolved.Provenance, resolved.Candidate)
-	}
-	if resolved.TestBasis.Request.Path != "/" || !strings.Contains(resolved.TestBasis.Request.Body, "node_options") || resolved.TestBasis.ProofBasis != "mitigation-discriminator" {
-		t.Fatalf("test basis = %+v", resolved.TestBasis)
+	if resolved.Candidate.RuleID != "candidate-1" || strings.TrimSpace(resolved.Candidate.Rule) == "" {
+		t.Fatalf("resolved candidate = %+v", resolved.Candidate)
 	}
 	if resolved.Provenance.DefenseResult.ResultID != defense.ResultID || resolved.Provenance.CheckResult.ResultID != check.ResultID {
 		t.Fatal("both verified locators were not retained")
@@ -194,7 +191,7 @@ func TestLocatorResolutionRejectsVolumePayloadTamper(t *testing.T) {
 func TestReferenceOnlyValidationIsStrictAndLegacyInlineRemainsValid(t *testing.T) {
 	resolver, defense, check, _ := locatorFixture(t, false)
 	_ = resolver
-	reference := SubmitDefenseValidationRequest{ContractID: contractID, RequestID: "mc-request", CorrelationID: "correlation-1", RoutePolicy: locatorRoutePolicy, DefenseResult: &defense, CheckResult: &check, TestBasisID: "check-artifact:http", ExecutionMode: execInMemory}
+	reference := SubmitDefenseValidationRequest{ContractID: contractID, RequestID: "mc-request", CorrelationID: "correlation-1", RoutePolicy: locatorRoutePolicy, DefenseResult: &defense, CheckResult: &check, TestBasisID: "check-artifact:http"}
 	if fields := validate(reference); len(fields) != 0 {
 		t.Fatalf("valid locator request fields=%v", fields)
 	}
@@ -204,16 +201,6 @@ func TestReferenceOnlyValidationIsStrictAndLegacyInlineRemainsValid(t *testing.T
 	}
 	if fields := validate(validLifecycleRequest("legacy-inline")); len(fields) != 0 {
 		t.Fatalf("legacy inline request rejected: %v", fields)
-	}
-}
-
-func TestLocatorSelectionRequiresExactEligibleArtifactID(t *testing.T) {
-	resolver, defense, check, _ := locatorFixture(t, false)
-	if _, err := resolver.Resolve(context.Background(), defense, check, "network-artifact"); err == nil || !strings.Contains(err.Error(), "not an eligible HTTP mitigation artifact") {
-		t.Fatalf("ineligible selection error = %v", err)
-	}
-	if _, err := resolver.Resolve(context.Background(), defense, check, "missing-artifact"); err == nil || !strings.Contains(err.Error(), "not an eligible HTTP mitigation artifact") {
-		t.Fatalf("missing selection error = %v", err)
 	}
 }
 
@@ -258,8 +245,8 @@ func TestCompatibilityDispatchPreservesInlineRequestWhenUpstreamModeEnabled(t *t
 	previous := upstreamInputMode
 	upstreamInputMode = true
 	t.Cleanup(func() { upstreamInputMode = previous })
-	out := executeRequestedScenario(context.Background(), validLifecycleRequest("compat-inline"), "run-inline", "result-inline")
-	if strings.Contains(out.Actual.Detail, "Databricks") {
+	out := resolveRequestedRule(context.Background(), validLifecycleRequest("compat-inline"), "run-inline", "result-inline")
+	if strings.Contains(out.Detail, "Databricks") {
 		t.Fatalf("inline request was sent to upstream resolver: %+v", out)
 	}
 }
@@ -322,17 +309,20 @@ func TestLocatorDatabricksConfigDerivesDSNCompatibility(t *testing.T) {
 	}
 }
 
-func TestInlineExecutionDoesNotInitializeLocatorDatabricks(t *testing.T) {
+func TestInlineResolutionDoesNotInitializeLocatorDatabricks(t *testing.T) {
 	previous := newLocatorInputResolver
 	called := false
 	newLocatorInputResolver = func() (locatorInputResolver, error) { called = true; return nil, context.Canceled }
 	t.Cleanup(func() { newLocatorInputResolver = previous })
 	req := validLifecycleRequest("inline-local")
-	out := executeScenario(context.Background(), req, "run-inline", "result-inline")
+	out := reportInlineCandidate(req, "run-inline", "result-inline")
 	if called {
-		t.Fatal("inline execution initialized locator Databricks")
+		t.Fatal("inline resolution initialized locator Databricks")
 	}
-	if out.TerminalState == stateCouldNotTest && strings.Contains(out.Actual.Detail, "Databricks") {
-		t.Fatalf("inline execution depended on Databricks: %+v", out)
+	if out.TerminalState != stateRuleResolved {
+		t.Fatalf("inline candidate should resolve without any external dependency: %+v", out)
+	}
+	if strings.Contains(out.Detail, "Databricks") {
+		t.Fatalf("inline resolution depended on Databricks: %+v", out)
 	}
 }

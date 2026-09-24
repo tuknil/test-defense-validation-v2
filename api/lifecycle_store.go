@@ -211,10 +211,10 @@ func (s *RunStore) CreateOrGet(ctx context.Context, run DurableRun) (DurableRun,
 	}
 	defer func() { _ = tx.Rollback() }()
 	res, err := tx.ExecContext(ctx, `INSERT INTO defense_validation_run
-		(run_id,result_id,terminal_state,match,created_at,request,response,request_id,
+		(run_id,result_id,terminal_state,created_at,request,response,request_id,
 		 correlation_id,request_digest,status,updated_at,progress_phase,progress_message,
 			 callback_url,callback_workflow_id,callback_signal,callback_event_id,callback_state,callback_next_at)
-		VALUES($1,$2,'',FALSE,$3,$4,'{}',$5,$6,$7,'queued',$3,'queued','Awaiting worker',$8,$9,$10,$11,
+		VALUES($1,$2,'',$3,$4,'{}',$5,$6,$7,'queued',$3,'queued','Awaiting worker',$8,$9,$10,$11,
 		       CASE WHEN $8::text IS NULL THEN NULL ELSE 'waiting' END,$3)
 		ON CONFLICT (request_id) WHERE request_id IS NOT NULL DO NOTHING`, run.RunID,
 		*run.ResultID, run.CreatedAt, []byte(run.Request), run.RequestID, run.CorrelationID,
@@ -406,10 +406,10 @@ func (s *RunStore) StageOutcome(ctx context.Context, id, workerID, leaseToken st
 	if err := validateCanonicalResultPayload(out, payload); err != nil {
 		return false, err
 	}
-	res, err := s.db.ExecContext(ctx, `UPDATE defense_validation_run SET response=$4::jsonb,result_payload=$5,match=$6,updated_at=now(),
+	res, err := s.db.ExecContext(ctx, `UPDATE defense_validation_run SET response=$4::jsonb,result_payload=$5,updated_at=now(),
 		progress_phase='publishing',progress_message='Publishing immutable result'
 		WHERE run_id=$1 AND worker_id=$2 AND lease_token=$3 AND status='running'
-		AND cancel_requested=FALSE AND lease_expires_at>now() AND response='{}'::jsonb`, id, workerID, leaseToken, string(payload), payload, out.Match)
+		AND cancel_requested=FALSE AND lease_expires_at>now() AND response='{}'::jsonb`, id, workerID, leaseToken, string(payload), payload)
 	if err != nil {
 		return false, err
 	}
@@ -436,13 +436,13 @@ func (s *RunStore) CompletePublished(ctx context.Context, id, workerID, leaseTok
 		return false, err
 	}
 	res, err := s.db.ExecContext(ctx, `UPDATE defense_validation_run SET
-		status='completed',terminal_state=$4,match=$5,response=$6::jsonb,result_payload=$8,completion=$7,completed_at=now(),updated_at=now(),
+		status='completed',terminal_state=$4,response=$5::jsonb,result_payload=$7,completion=$6,completed_at=now(),updated_at=now(),
 		progress_phase='finished',progress_message='Defense validation completed',publication_pending=FALSE,
 		publication_retry_at=NULL,callback_state=CASE WHEN callback_url IS NULL THEN callback_state ELSE 'pending' END,
 		callback_next_at=CASE WHEN callback_url IS NULL THEN callback_next_at ELSE now() END,
 		worker_id=NULL,lease_token=NULL,lease_expires_at=NULL
 		WHERE run_id=$1 AND worker_id=$2 AND lease_token=$3 AND status='running'
-		AND lease_expires_at>now()`, id, workerID, leaseToken, out.TerminalState, out.Match, string(payload), completion, payload)
+		AND lease_expires_at>now()`, id, workerID, leaseToken, out.TerminalState, string(payload), completion, payload)
 	if err != nil {
 		return false, err
 	}
@@ -475,13 +475,13 @@ func (s *RunStore) FailOutcome(ctx context.Context, id, workerID, leaseToken str
 		return false, err
 	}
 	res, err := s.db.ExecContext(ctx, `UPDATE defense_validation_run SET status='failed',
-		terminal_state='malfunction',match=$4,response=$5,failure=$6,completed_at=now(),updated_at=now(),
-		progress_phase='failed',progress_message=$7,
+		terminal_state='malfunction',response=$4,failure=$5,completed_at=now(),updated_at=now(),
+		progress_phase='failed',progress_message=$6,
 		callback_state=CASE WHEN callback_url IS NULL THEN callback_state ELSE 'pending' END,
 		callback_next_at=CASE WHEN callback_url IS NULL THEN callback_next_at ELSE now() END,
 		worker_id=NULL,lease_token=NULL,lease_expires_at=NULL
 		WHERE run_id=$1 AND worker_id=$2 AND lease_token=$3 AND status='running' AND cancel_requested=FALSE
-		AND lease_expires_at>now()`, id, workerID, leaseToken, out.Match, result, failure, f.Detail)
+		AND lease_expires_at>now()`, id, workerID, leaseToken, result, failure, f.Detail)
 	if err != nil {
 		return false, err
 	}

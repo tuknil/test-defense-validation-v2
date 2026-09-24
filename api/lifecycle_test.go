@@ -39,7 +39,7 @@ func TestCanonicalResultIntegrityExcludesIntegrityFields(t *testing.T) {
 	outcome := RunOutcome{
 		Capability: "defense-validation", ContractID: contractID, RequestID: "request:integrity",
 		RunID: "run:integrity", ResultID: "result:integrity", Status: statusCompleted,
-		TerminalState: stateBlocked, EvidenceRefs: []string{}, CreatedAt: time.Date(2026, 9, 2, 0, 0, 0, 0, time.UTC),
+		TerminalState: stateRuleResolved, EvidenceRefs: []string{}, CreatedAt: time.Date(2026, 9, 2, 0, 0, 0, 0, time.UTC),
 	}
 	if err := setCanonicalIntegrity(&outcome); err != nil {
 		t.Fatal(err)
@@ -65,9 +65,8 @@ func TestSharedProfileCanonicalResultPayloadUsesRFC8785Integrity(t *testing.T) {
 	outcome := RunOutcome{
 		Capability: "defense-validation", ContractID: contractID, RequestID: "request:shared-integrity",
 		RunID: "run:shared-integrity", ResultID: "result:shared-integrity", Status: statusCompleted,
-		TerminalState: stateBlocked, ProfileID: sharedV2ProfileID, EvidenceRefs: []string{},
-		CreatedAt:  time.Date(2026, 9, 14, 0, 0, 0, 0, time.UTC),
-		Accounting: &CoverageAccounting{RequiredObligationCount: 2, AccountedObligationCount: 2},
+		TerminalState: stateRuleResolved, ProfileID: sharedV2ProfileID, EvidenceRefs: []string{},
+		CreatedAt: time.Date(2026, 9, 14, 0, 0, 0, 0, time.UTC),
 	}
 	if err := setCanonicalIntegrity(&outcome); err != nil {
 		t.Fatal(err)
@@ -82,12 +81,10 @@ func TestSharedProfileCanonicalResultPayloadUsesRFC8785Integrity(t *testing.T) {
 }
 
 func validLifecycleRequest(id string) SubmitDefenseValidationRequest {
-	blocked := true
-	testBasis, _ := json.Marshal(TestBasisSpec{Kind: "http-request-attack", ProofBasis: "mitigation-discriminator", Expected: TestExpected{Blocked: &blocked}})
 	candidate, _ := json.Marshal(CandidateSpec{Kind: "waf-rule", Rule: `SecRule REQUEST_BODY "@rx attack" "deny,status:403"`})
 	return SubmitDefenseValidationRequest{ContractID: contractID, RequestID: id, CorrelationID: "correlation-1",
 		CandidateArtifactID: "candidate-1", TestBasisID: "basis-1", CheckProfileID: "profile-1",
-		ExecutionMode: execInMemory, Candidate: candidate, TestBasis: testBasis}
+		Candidate: candidate}
 }
 
 func TestNormalizedRequestIgnoresJSONFormatting(t *testing.T) {
@@ -283,7 +280,7 @@ func TestPostgresCompletionIsImmutable(t *testing.T) {
 		t.Fatalf("lease ok=%t err=%v", ok, err)
 	}
 	outcome := RunOutcome{Capability: "defense-validation", ContractID: contractID, RequestID: run.RequestID,
-		RunID: run.RunID, ResultID: *run.ResultID, Status: statusCompleted, TerminalState: stateBlocked,
+		RunID: run.RunID, ResultID: *run.ResultID, Status: statusCompleted, TerminalState: stateRuleResolved,
 		CorrelationID: run.CorrelationID, EvidenceRefs: []string{}, CreatedAt: time.Now().UTC()}
 	outcome.ResultRef = &ResultRef{System: "databricks", Catalog: "catalog", Schema: "defense_validation", Table: "results", Key: outcome.ResultID}
 	if err := setCanonicalIntegrity(&outcome); err != nil {
@@ -298,7 +295,7 @@ func TestPostgresCompletionIsImmutable(t *testing.T) {
 		t.Fatalf("complete written=%t err=%v", written, err)
 	}
 	different := outcome
-	different.TerminalState = stateNotBlocked
+	different.TerminalState = stateFailed
 	written, err = s.CompletePublished(ctx, run.RunID, "worker-1", leased.LeaseToken, different, payload)
 	if err != nil || written {
 		t.Fatalf("terminal result was mutable: written=%t err=%v", written, err)

@@ -49,8 +49,6 @@ body {
 .dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
 .dot-ok { background: var(--ok); } .dot-warn { background: var(--warn); } .dot-err { background: var(--err); }
 .run-state { font: 600 12px var(--mono); }
-.run-match { margin-left: auto; font: 700 12px var(--mono); }
-.run-match-ok { color: var(--ok); } .run-match-no { color: var(--err); }
 .run-id { font: 11px var(--mono); color: var(--muted); margin-top: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .run-time { font: 11px var(--mono); color: var(--muted); margin-top: 2px; }
 
@@ -126,3 +124,15 @@ table.cmp td.diff { color: var(--err); font-weight: 700; }
 .response details ol { margin: 8px 0 0; padding-left: 20px; color: var(--muted); font: 12px var(--mono); }
 .response details li { margin: 2px 0; }
 .response details .json-dump { margin: 8px 0 0; padding: 10px; background: var(--panel, rgba(127,127,127,0.08)); border: 1px solid var(--border); border-radius: 6px; font: 12px/1.5 var(--mono); color: var(--text); white-space: pre; overflow-x: auto; max-height: 460px; overflow-y: auto; }
+
+/* Intro line under the composer heading. */
+.lede { margin: -6px 0 18px; color: var(--muted); max-width: 70ch; line-height: 1.5; }
+
+/* The resolved rule body: wraps rather than scrolling off, since rule sets are
+   long and the whole rule is the point of the page. */
+pre.code.rule {
+  max-height: 420px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}

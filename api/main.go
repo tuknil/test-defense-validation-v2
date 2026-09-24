@@ -52,19 +52,11 @@ type SubmitDefenseValidationRequest struct {
 	ContractID          string `json:"contract_id"`
 	RequestID           string `json:"request_id,omitempty"`
 	CandidateArtifactID string `json:"candidate_artifact_id"`
-	// TestBasisID is an executable reference in inline mode. In reference-only
-	// mode it is a non-executable selector that must exactly identify an eligible
-	// artifact inside the verified Check Generation result.
-	TestBasisID       string          `json:"test_basis_id"`
-	SubstrateSelector string          `json:"substrate_selector,omitempty"`
-	CheckProfileID    string          `json:"check_profile_id"`
-	Substrate         json.RawMessage `json:"substrate,omitempty"`
-	Candidate         json.RawMessage `json:"candidate,omitempty"`
-	TestBasis         json.RawMessage `json:"test_basis,omitempty"`
-	// ExecutionMode selects the substrate adapter. Defaults to "inmemory" when
-	// omitted; other values include "local" (docker), "aci"/"aci-sp", "github",
-	// "github-ghcr", and "firewall".
-	ExecutionMode string `json:"execution_mode,omitempty"`
+	// TestBasisID is retained as an opaque producer selector for compatibility; no
+	// test is derived from it, because nothing is executed here.
+	TestBasisID    string          `json:"test_basis_id"`
+	CheckProfileID string          `json:"check_profile_id"`
+	Candidate      json.RawMessage `json:"candidate,omitempty"`
 	// CorrelationID is echoed into the result envelope (optional).
 	CorrelationID string `json:"correlation_id,omitempty"`
 	// Reference-only mode is additive and mutually exclusive with inline artifacts
@@ -110,46 +102,6 @@ type PrimaryCandidate struct {
 	SelectedControlClass string `json:"selected_control_class"`
 }
 
-// SubstrateSpec is the inline validation substrate — a bounded, non-production
-// container image to host the candidate against (LLD §2.2, §3.4).
-type SubstrateSpec struct {
-	Kind            string `json:"kind"`
-	Image           string `json:"image"`
-	Digest          string `json:"digest"`
-	Port            int    `json:"port"`
-	VulnerabilityID string `json:"vulnerability_id"`
-}
-
-// CandidateSpec is the inline candidate mitigation — here, a WAF rule.
-type CandidateSpec struct {
-	Kind   string `json:"kind"`
-	Engine string `json:"engine"`
-	RuleID string `json:"rule_id"`
-	Rule   string `json:"rule"`
-	Action string `json:"action"`
-}
-
-// TestBasisSpec is the inline attack/discriminator sample and expected outcome.
-type TestBasisSpec struct {
-	Kind       string       `json:"kind"`
-	ProofBasis string       `json:"proof_basis"`
-	Request    TestRequest  `json:"request"`
-	Expected   TestExpected `json:"expected"`
-}
-
-type TestRequest struct {
-	Method  string            `json:"method"`
-	Path    string            `json:"path"`
-	Headers map[string]string `json:"headers"`
-	Body    string            `json:"body"`
-}
-
-type TestExpected struct {
-	Classification string `json:"classification"`
-	Blocked        *bool  `json:"blocked"`
-	StatusCode     int    `json:"status_code"`
-}
-
 // AcceptedRunResponse is the accepted run reference returned on submit (LLD §9.1).
 type AcceptedRunResponse struct {
 	RunID    string `json:"run_id"`
@@ -177,17 +129,6 @@ var upstreamInputMode bool
 var dbxReader *DatabricksReader
 
 func main() {
-	// CLI mode used by the GitHub Actions workflow: run one scenario locally
-	// (docker on the runner) and print the RunOutcome JSON to stdout. No DB.
-	if len(os.Args) > 2 && os.Args[1] == "run-scenario" {
-		runScenarioCLI(os.Args[2])
-		return
-	}
-	// CLI: convert an http-probe stimulus (file arg or stdin) into a TestBasisSpec.
-	if len(os.Args) > 1 && os.Args[1] == "stimulus-to-testbasis" {
-		stimulusCLI(os.Args[2:])
-		return
-	}
 	// CLI: print the custom WAF rule from a control-translation result.
 	if len(os.Args) > 1 && os.Args[1] == "control-translation-waf-rule" {
 		controlTranslationCLI(os.Args[2:])
@@ -279,26 +220,6 @@ func enrichEnvelope(out *RunOutcome, correlationID string) {
 	if dbx != nil {
 		out.ResultRef = dbx.ResultRef(out.ResultID)
 	}
-}
-
-// runScenarioCLI executes one scenario file and prints the RunOutcome JSON to
-// stdout. Used by the GitHub Actions workflow; keeps stdout JSON-only.
-func runScenarioCLI(path string) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		log.Fatalf("read scenario: %v", err)
-	}
-	var req SubmitDefenseValidationRequest
-	if err := json.Unmarshal(data, &req); err != nil {
-		log.Fatalf("parse scenario: %v", err)
-	}
-	req.ExecutionMode = execLocal // on the runner, use docker
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-	defer cancel()
-	out := executeScenario(ctx, req, "dv-run-"+newID(), resultIDPrefix+newID())
-	enc := json.NewEncoder(os.Stdout)
-	enc.SetIndent("", "  ")
-	_ = enc.Encode(out)
 }
 
 func handleOpenAPI(w http.ResponseWriter, r *http.Request) {
@@ -404,7 +325,7 @@ func handleSubmitRunSync(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := executionContext(r.Context())
 	defer cancel()
 
-	outcome := executeRequestedScenario(ctx, req, runID, resultID)
+	outcome := resolveRequestedRule(ctx, req, runID, resultID)
 	enrichEnvelope(&outcome, req.CorrelationID)
 	outcome.CreatedAt = time.Now().UTC()
 	if err := setCanonicalIntegrity(&outcome); err != nil {
@@ -440,7 +361,6 @@ func handleSubmitRunSync(w http.ResponseWriter, r *http.Request) {
 		RunID:         runID,
 		ResultID:      resultID,
 		TerminalState: outcome.TerminalState,
-		Match:         outcome.Match,
 		CreatedAt:     time.Now().UTC(),
 		Request:       raw,
 		Response:      outcome,
@@ -530,27 +450,9 @@ func validate(req SubmitDefenseValidationRequest) []string {
 			}
 		}
 	}
-	// substrate_selector is optional (LLD §10.1) — no constraint.
 
-	// execution_mode is optional; when set it must be a known adapter.
-	if m := req.ExecutionMode; m != "" && m != execLocal && m != execInMemory && m != execACI && m != execACISP && m != execGitHub && m != execGitHubGHCR && m != execFirewall {
-		bad = append(bad, "execution_mode")
-	}
-
-	// Nested artifact bodies are optional, but validated when present.
-	if len(req.Substrate) > 0 {
-		var s SubstrateSpec
-		if err := json.Unmarshal(req.Substrate, &s); err != nil {
-			bad = append(bad, "substrate")
-		} else {
-			if s.Kind == "" {
-				bad = append(bad, "substrate.kind")
-			}
-			if strings.TrimSpace(s.Image) == "" {
-				bad = append(bad, "substrate.image")
-			}
-		}
-	}
+	// The candidate body is optional, but validated when present: it is the rule
+	// this capability reports.
 	if len(req.Candidate) > 0 {
 		var c CandidateSpec
 		if err := json.Unmarshal(req.Candidate, &c); err != nil {
@@ -561,23 +463,6 @@ func validate(req SubmitDefenseValidationRequest) []string {
 			}
 			if strings.TrimSpace(c.Rule) == "" {
 				bad = append(bad, "candidate.rule")
-			}
-		}
-	}
-	if len(req.TestBasis) > 0 {
-		var t TestBasisSpec
-		if err := json.Unmarshal(req.TestBasis, &t); err != nil {
-			bad = append(bad, "test_basis")
-		} else {
-			if t.Kind == "" {
-				bad = append(bad, "test_basis.kind")
-			}
-			// Proof basis must be one of the two admitted values (LLD §7.1).
-			if t.ProofBasis != "verified-vuln-artifact" && t.ProofBasis != "mitigation-discriminator" {
-				bad = append(bad, "test_basis.proof_basis")
-			}
-			if t.Expected.Blocked == nil {
-				bad = append(bad, "test_basis.expected.blocked")
 			}
 		}
 	}
