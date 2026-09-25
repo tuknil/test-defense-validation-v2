@@ -311,8 +311,8 @@ const controlTranslationUsage = `usage: control-translation-waf-rule [flags] [re
   content_hash, and prints it. Sends nothing unless --post is given.
 
   --post      after printing, build the enforcement issue from this rule and
-              POST it to XSIAM. Needs XSIAM_HOST, XSIAM_API_KEY_HEADER,
-              XSIAM_API_KEY and XDR_AUTH_ID, plus:
+              POST it to XSIAM. Needs XSIAM_HOST, XSIAM_API_KEY and
+              XDR_AUTH_ID, plus:
 
     --cve CVE-YYYY-NNNNN        required with --post
     --policy-id ID              Akamai security policy id

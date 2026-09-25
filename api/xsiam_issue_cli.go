@@ -125,8 +125,8 @@ const xsiamIssueUsage = `usage: xsiam-issue [--send] [issue.json|-]
               request_data wrapper). "-" reads stdin. Omit it to build a worked
               example instead.
 
-  --send      create the issue. Requires XSIAM_HOST, XSIAM_API_KEY_HEADER,
-              XSIAM_API_KEY and XDR_AUTH_ID.
+  --send      create the issue. Requires XSIAM_HOST, XSIAM_API_KEY and
+              XDR_AUTH_ID.
 
   --from-result FILE
               build the issue from a control-translation result: the rule is

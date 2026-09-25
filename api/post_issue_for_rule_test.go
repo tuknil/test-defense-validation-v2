@@ -64,7 +64,6 @@ func TestPostIssueForRulePostsTheResolvedRule(t *testing.T) {
 	defer server.Close()
 
 	t.Setenv("XSIAM_HOST", strings.TrimPrefix(server.URL, "http://"))
-	t.Setenv("XSIAM_API_KEY_HEADER", "Authorization")
 	t.Setenv("XSIAM_API_KEY", "secret-key")
 	t.Setenv("XDR_AUTH_ID", "42")
 
@@ -120,7 +119,6 @@ func TestPostIssueForRuleFailsBeforeSendingOnABadMapping(t *testing.T) {
 	defer server.Close()
 
 	t.Setenv("XSIAM_HOST", strings.TrimPrefix(server.URL, "http://"))
-	t.Setenv("XSIAM_API_KEY_HEADER", "Authorization")
 	t.Setenv("XSIAM_API_KEY", "secret-key")
 	t.Setenv("XDR_AUTH_ID", "42")
 

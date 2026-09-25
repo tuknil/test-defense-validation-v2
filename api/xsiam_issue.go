@@ -9,10 +9,12 @@ package main
 //
 // Env:
 //
-//	XSIAM_HOST             host only, e.g. api-example.xdr.eu.paloaltonetworks.com
-//	XSIAM_API_KEY_HEADER   name of the key header, e.g. Authorization
-//	XSIAM_API_KEY          the key itself (secret; never logged or echoed)
-//	XDR_AUTH_ID            value for x-xdr-auth-id
+//	XSIAM_HOST     host only, e.g. api-example.xdr.eu.paloaltonetworks.com
+//	XSIAM_API_KEY  the key itself (secret; never logged or echoed)
+//	XDR_AUTH_ID    value for x-xdr-auth-id
+//
+// The key header is always Authorization, so it is fixed rather than configured:
+// one fewer variable to set, and one fewer way to misconfigure a tenant.
 //
 // The two heaviest fields, janusrequestcontext and januspayload, are JSON
 // *strings* inside the JSON body. They are built here from typed values and
@@ -37,7 +39,9 @@ import (
 
 // XSIAMConfig is the connection and credential set for one tenant.
 type XSIAMConfig struct {
-	Host         string
+	Host string
+	// APIKeyHeader is fixed to Authorization by XSIAMConfigFromEnv; it stays a
+	// field so a caller constructing a config directly can override it.
 	APIKeyHeader string
 	APIKey       string // secret
 	AuthID       string
@@ -48,19 +52,18 @@ type XSIAMConfig struct {
 	scheme string
 }
 
-// XSIAMConfigFromEnv reads the four required variables. The error names what is
+// XSIAMConfigFromEnv reads the three required variables. The error names what is
 // missing without ever printing a value, so it is safe in logs.
 func XSIAMConfigFromEnv() (XSIAMConfig, error) {
 	cfg := XSIAMConfig{
 		Host:         strings.TrimSpace(os.Getenv("XSIAM_HOST")),
-		APIKeyHeader: strings.TrimSpace(os.Getenv("XSIAM_API_KEY_HEADER")),
+		APIKeyHeader: "Authorization",
 		APIKey:       strings.TrimSpace(os.Getenv("XSIAM_API_KEY")),
 		AuthID:       strings.TrimSpace(os.Getenv("XDR_AUTH_ID")),
 	}
 	var missing []string
 	for name, value := range map[string]string{
-		"XSIAM_HOST": cfg.Host, "XSIAM_API_KEY_HEADER": cfg.APIKeyHeader,
-		"XSIAM_API_KEY": cfg.APIKey, "XDR_AUTH_ID": cfg.AuthID,
+		"XSIAM_HOST": cfg.Host, "XSIAM_API_KEY": cfg.APIKey, "XDR_AUTH_ID": cfg.AuthID,
 	} {
 		if value == "" {
 			missing = append(missing, name)

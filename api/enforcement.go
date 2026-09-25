@@ -10,8 +10,8 @@ package main
 //
 // Split of inputs:
 //
-//	XSIAM tenant + credentials   environment (XSIAM_HOST, XSIAM_API_KEY_HEADER,
-//	                             XSIAM_API_KEY, XDR_AUTH_ID)
+//	XSIAM tenant + credentials   environment (XSIAM_HOST, XSIAM_API_KEY,
+//	                             XDR_AUTH_ID)
 //	everything else              the request's `enforcement` JSON object
 //	identity                     the run itself (request_id, correlation_id)
 //

@@ -238,26 +238,45 @@ func TestCreateIssueSurfacesTheErrorBody(t *testing.T) {
 }
 
 func TestXSIAMConfigFromEnvNamesEveryMissingVariable(t *testing.T) {
-	for _, key := range []string{"XSIAM_HOST", "XSIAM_API_KEY_HEADER", "XSIAM_API_KEY", "XDR_AUTH_ID"} {
+	required := []string{"XSIAM_HOST", "XSIAM_API_KEY", "XDR_AUTH_ID"}
+	for _, key := range required {
 		t.Setenv(key, "")
 	}
 	_, err := XSIAMConfigFromEnv()
 	if err == nil {
 		t.Fatal("expected an error when nothing is configured")
 	}
-	for _, key := range []string{"XSIAM_HOST", "XSIAM_API_KEY_HEADER", "XSIAM_API_KEY", "XDR_AUTH_ID"} {
+	for _, key := range required {
 		if !strings.Contains(err.Error(), key) {
 			t.Errorf("error should name %s: %v", key, err)
 		}
 	}
+	// The key header is fixed, so it is not something an operator can leave unset.
+	if strings.Contains(err.Error(), "XSIAM_API_KEY_HEADER") {
+		t.Errorf("the header is no longer configurable and must not be reported missing: %v", err)
+	}
 
 	// A pasted URL rather than a bare host would silently build a wrong endpoint.
 	t.Setenv("XSIAM_HOST", "https://example.xdr.paloaltonetworks.com/")
-	t.Setenv("XSIAM_API_KEY_HEADER", "Authorization")
 	t.Setenv("XSIAM_API_KEY", "k")
 	t.Setenv("XDR_AUTH_ID", "1")
 	if _, err := XSIAMConfigFromEnv(); err == nil {
 		t.Error("a host containing a scheme or path must be rejected")
+	}
+}
+
+// TestXSIAMConfigUsesTheFixedAuthorizationHeader pins the header the client
+// sends, now that it is no longer read from the environment.
+func TestXSIAMConfigUsesTheFixedAuthorizationHeader(t *testing.T) {
+	t.Setenv("XSIAM_HOST", "example.xdr.paloaltonetworks.com")
+	t.Setenv("XSIAM_API_KEY", "k")
+	t.Setenv("XDR_AUTH_ID", "1")
+	cfg, err := XSIAMConfigFromEnv()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.APIKeyHeader != "Authorization" {
+		t.Errorf("APIKeyHeader = %q, want Authorization", cfg.APIKeyHeader)
 	}
 }
 

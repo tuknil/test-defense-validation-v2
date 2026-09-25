@@ -11,3 +11,8 @@ api/data/
 
 # JetBrains IDE workspace
 .idea/
+
+# Compiled API binaries (~27MB each; two were committed by accident)
+api/defense-validation-api
+api/mitigation-check-api
+api/dvapi

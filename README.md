@@ -224,8 +224,8 @@ exists; when the write is skipped or fails, the skip is recorded:
  must not name a candidate that cannot be looked up."
 ```
 
-**Credentials stay in the environment** (`XSIAM_HOST`, `XSIAM_API_KEY_HEADER`,
-`XSIAM_API_KEY`, `XDR_AUTH_ID`). They are deployment state, not request data — a
+**Credentials stay in the environment** (`XSIAM_HOST`, `XSIAM_API_KEY`,
+`XDR_AUTH_ID`; the key header is always `Authorization` and is not configurable). They are deployment state, not request data — a
 caller must not be able to redirect a hand-off to another tenant by changing a
 body. Everything the rule artifact cannot supply comes from the `enforcement`
 JSON; unknown keys in it are rejected, since a mistyped one would otherwise be
@@ -253,8 +253,8 @@ go run . xsiam-issue issue.json           # same, from your own issue JSON ("-" 
 go run . xsiam-issue --send issue.json    # actually create the issue
 ```
 
-Sending needs `XSIAM_HOST` (bare host, no scheme), `XSIAM_API_KEY_HEADER`,
-`XSIAM_API_KEY` and `XDR_AUTH_ID`. **Printing is the default**: creating an issue
+Sending needs `XSIAM_HOST` (bare host, no scheme), `XSIAM_API_KEY` and
+`XDR_AUTH_ID`. The key header is fixed to `Authorization`. **Printing is the default**: creating an issue
 is outward-facing and cannot be undone from here, so it takes an explicit
 `--send`.
 
