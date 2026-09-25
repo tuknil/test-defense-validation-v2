@@ -168,6 +168,31 @@ cd api && go run . control-translation-waf-rule testdata/control-translation-res
 It resolves `primary_candidate.artifact_id` against the `artifacts` map, verifies
 `content_hash`, and prints the rule with its provenance.
 
+With `--post` the same resolved rule is then mapped to an enforcement issue and
+POSTed to XSIAM — print first, then hand off:
+
+```bash
+cd api && go run . control-translation-waf-rule result.json --post \
+  --cve CVE-2026-77392 --policy-id policy-1 --rule-id 60022381 --policy-version 43 \
+  --control-instance control-instance:akamai-production \
+  --hostname afo.example.com --scope population-scope:prod-web
+```
+
+The rule is resolved and verified once, printed, and that same value is handed to
+`PostIssueForRule` — nothing is re-parsed. Posting takes an explicit `--post`
+because this command's job is to print a rule: creating an issue is
+outward-facing and cannot be undone, so it is never a side effect of looking at
+one. The mapping runs before the request, so a rule that cannot be mapped fails
+without anything being sent.
+
+As a library:
+
+```go
+rule, err := ExtractCustomWAFRule(resultJSON)   // resolve + verify
+_ = WriteCustomWAFRule(os.Stdout, rule)         // print
+res, err := PostIssueForRule(ctx, rule, opts)   // map -> issue -> POST
+```
+
 ### Creating an XSIAM enforcement issue
 
 `api/xsiam_issue.go` is a standalone client for `POST /public_api/v1/issue` — the

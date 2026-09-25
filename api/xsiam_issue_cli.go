@@ -153,9 +153,7 @@ func parseInt64Flag(flag, value string) int64 {
 }
 
 // issueFromControlTranslation resolves the rule from a control-translation result
-// and maps it into a DEPLOY issue. Identity fields that would normally come from
-// the orchestrator are left empty rather than invented; only the rule-derived
-// parts are filled here.
+// file and maps it into a DEPLOY issue.
 func issueFromControlTranslation(path string, opts JanusPayloadOptions) (XSIAMIssue, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -165,6 +163,16 @@ func issueFromControlTranslation(path string, opts JanusPayloadOptions) (XSIAMIs
 	if err != nil {
 		return XSIAMIssue{}, err
 	}
+	return IssueFromCustomWAFRule(rule, opts)
+}
+
+// IssueFromCustomWAFRule maps an already-resolved rule into a DEPLOY issue.
+//
+// Identity fields that belong to the orchestrator — request, correlation and
+// causation ids, the authorization chain, the change reference — are left empty
+// rather than generated here. A fabricated correlation id would break the very
+// lineage the issue exists to carry.
+func IssueFromCustomWAFRule(rule CustomWAFRule, opts JanusPayloadOptions) (XSIAMIssue, error) {
 	payload, err := JanusPayloadFromCustomWAFRule(rule, opts)
 	if err != nil {
 		return XSIAMIssue{}, err
@@ -217,6 +225,23 @@ func issueFromControlTranslation(path string, opts JanusPayloadOptions) (XSIAMIs
 		Severity:        "HIGH",
 		CustomFields:    fields,
 	}, nil
+}
+
+// PostIssueForRule builds the enforcement issue for a resolved rule and posts it
+// to XSIAM, reading the tenant configuration from the environment.
+//
+// This performs an outward-facing, irreversible create. Callers that only want to
+// inspect the request should use IssueFromCustomWAFRule with EncodeIssue instead.
+func PostIssueForRule(ctx context.Context, rule CustomWAFRule, opts JanusPayloadOptions) (map[string]any, error) {
+	issue, err := IssueFromCustomWAFRule(rule, opts)
+	if err != nil {
+		return nil, err
+	}
+	cfg, err := XSIAMConfigFromEnv()
+	if err != nil {
+		return nil, err
+	}
+	return NewXSIAMClient(cfg).CreateIssue(ctx, issue)
 }
 
 // loadOrBuildIssue reads an issue from a file or stdin, or builds the example.

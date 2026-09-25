@@ -13,6 +13,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -190,6 +191,12 @@ func PrintCustomWAFRule(w io.Writer, raw []byte) error {
 	if err != nil {
 		return err
 	}
+	return WriteCustomWAFRule(w, rule)
+}
+
+// WriteCustomWAFRule prints a rule that has already been extracted, so a caller
+// that goes on to use the rule does not have to resolve and re-verify it twice.
+func WriteCustomWAFRule(w io.Writer, rule CustomWAFRule) error {
 	profile := rule.Metadata.SyntaxProfile
 	binding := rule.Metadata.RecommendedPolicyBinding
 	header := fmt.Sprintf(`// artifact_id:   %s
@@ -210,19 +217,63 @@ func PrintCustomWAFRule(w io.Writer, raw []byte) error {
 	if _, err := w.Write(rule.Pretty()); err != nil {
 		return err
 	}
-	_, err = io.WriteString(w, "\n")
+	_, err := io.WriteString(w, "\n")
 	return err
 }
 
 // controlTranslationCLI backs the "control-translation-waf-rule" subcommand: it
-// reads the result from a file argument or stdin and prints the rule.
+// reads the result from a file argument or stdin, prints the resolved rule, and
+// with --post hands that same rule to PostIssueForRule.
+//
+// Posting takes an explicit flag because this command's job is to print a rule:
+// creating an XSIAM issue is outward-facing and cannot be undone from here, so it
+// should never be a side effect of looking at one.
 func controlTranslationCLI(args []string) {
+	opts := JanusPayloadOptions{}
+	post := false
+	var path string
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		next := func() string {
+			if i+1 < len(args) {
+				i++
+				return args[i]
+			}
+			fmt.Fprintf(os.Stderr, "control-translation-waf-rule: %s needs a value\n", arg)
+			os.Exit(1)
+			return ""
+		}
+		switch arg {
+		case "--post":
+			post = true
+		case "--cve":
+			opts.CVE = next()
+		case "--policy-id":
+			opts.PolicyID = next()
+		case "--rule-id":
+			opts.RuleID = parseInt64Flag(arg, next())
+		case "--policy-version":
+			opts.PolicyVersion = int(parseInt64Flag(arg, next()))
+		case "--control-instance":
+			opts.ControlInstanceID = next()
+		case "--hostname":
+			opts.ProtectedHostname = next()
+		case "--scope":
+			opts.TargetScopeID = next()
+		case "-h", "--help":
+			fmt.Fprint(os.Stderr, controlTranslationUsage)
+			return
+		default:
+			path = arg
+		}
+	}
+
 	var (
 		data []byte
 		err  error
 	)
-	if len(args) > 0 && args[0] != "-" {
-		data, err = os.ReadFile(args[0])
+	if path != "" && path != "-" {
+		data, err = os.ReadFile(path)
 	} else {
 		data, err = io.ReadAll(os.Stdin)
 	}
@@ -230,8 +281,44 @@ func controlTranslationCLI(args []string) {
 		fmt.Fprintf(os.Stderr, "read control-translation result: %v\n", err)
 		os.Exit(1)
 	}
-	if err := PrintCustomWAFRule(os.Stdout, data); err != nil {
+
+	// Resolve and verify once; the same rule is printed and then posted.
+	rule, err := ExtractCustomWAFRule(data)
+	if err != nil {
 		fmt.Fprintf(os.Stderr, "extract custom WAF rule: %v\n", err)
 		os.Exit(1)
 	}
+	if err := WriteCustomWAFRule(os.Stdout, rule); err != nil {
+		fmt.Fprintf(os.Stderr, "print custom WAF rule: %v\n", err)
+		os.Exit(1)
+	}
+
+	if !post {
+		return
+	}
+	res, err := PostIssueForRule(context.Background(), rule, opts)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "control-translation-waf-rule: %v\n", err)
+		os.Exit(1)
+	}
+	encoded, _ := json.MarshalIndent(res, "", "  ")
+	fmt.Fprintf(os.Stderr, "\nposted issue to XSIAM:\n%s\n", encoded)
 }
+
+const controlTranslationUsage = `usage: control-translation-waf-rule [flags] [result.json|-]
+
+  Resolves the custom WAF rule from a control-translation result, verifies its
+  content_hash, and prints it. Sends nothing unless --post is given.
+
+  --post      after printing, build the enforcement issue from this rule and
+              POST it to XSIAM. Needs XSIAM_HOST, XSIAM_API_KEY_HEADER,
+              XSIAM_API_KEY and XDR_AUTH_ID, plus:
+
+    --cve CVE-YYYY-NNNNN        required with --post
+    --policy-id ID              Akamai security policy id
+    --rule-id N                 Akamai custom rule id
+    --policy-version N          Akamai policy version
+    --control-instance ID       e.g. control-instance:akamai-production
+    --hostname HOST             protected hostname
+    --scope ID                  e.g. population-scope:prod-web
+`
