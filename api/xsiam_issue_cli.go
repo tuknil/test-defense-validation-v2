@@ -4,6 +4,9 @@ package main
 //
 //	go run . xsiam-issue [issue.json|-]          # print the request body, send nothing
 //	go run . xsiam-issue --send [issue.json|-]   # actually create the issue
+//	go run . xsiam-issue --from-result ct.json --cve CVE-… [--policy-id …]
+//	                                             # build the payload from a
+//	                                             # control-translation result
 //
 // Printing is the default on purpose: creating an issue is outward-facing and
 // cannot be undone from here, so sending takes an explicit --send.
@@ -18,16 +21,45 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
+	"strings"
 	"time"
 )
 
 func xsiamIssueCLI(args []string) {
 	send := false
-	var path string
-	for _, arg := range args {
+	var path, fromResult string
+	opts := JanusPayloadOptions{}
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		next := func() string {
+			if i+1 < len(args) {
+				i++
+				return args[i]
+			}
+			fmt.Fprintf(os.Stderr, "xsiam-issue: %s needs a value\n", arg)
+			os.Exit(1)
+			return ""
+		}
 		switch arg {
 		case "--send":
 			send = true
+		case "--from-result":
+			fromResult = next()
+		case "--cve":
+			opts.CVE = next()
+		case "--policy-id":
+			opts.PolicyID = next()
+		case "--rule-id":
+			opts.RuleID = parseInt64Flag(arg, next())
+		case "--policy-version":
+			opts.PolicyVersion = int(parseInt64Flag(arg, next()))
+		case "--control-instance":
+			opts.ControlInstanceID = next()
+		case "--hostname":
+			opts.ProtectedHostname = next()
+		case "--scope":
+			opts.TargetScopeID = next()
 		case "-h", "--help":
 			fmt.Fprint(os.Stderr, xsiamIssueUsage)
 			return
@@ -36,7 +68,20 @@ func xsiamIssueCLI(args []string) {
 		}
 	}
 
-	issue, err := loadOrBuildIssue(path)
+	if fromResult != "" && path != "" {
+		fmt.Fprintln(os.Stderr, "xsiam-issue: pass either an issue file or --from-result, not both")
+		os.Exit(1)
+	}
+
+	var (
+		issue XSIAMIssue
+		err   error
+	)
+	if fromResult != "" {
+		issue, err = issueFromControlTranslation(fromResult, opts)
+	} else {
+		issue, err = loadOrBuildIssue(path)
+	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "xsiam-issue: %v\n", err)
 		os.Exit(1)
@@ -82,7 +127,97 @@ const xsiamIssueUsage = `usage: xsiam-issue [--send] [issue.json|-]
 
   --send      create the issue. Requires XSIAM_HOST, XSIAM_API_KEY_HEADER,
               XSIAM_API_KEY and XDR_AUTH_ID.
+
+  --from-result FILE
+              build the issue from a control-translation result: the rule is
+              resolved and hash-verified, then mapped to januspayload.
+
+    --cve CVE-YYYY-NNNNN        required with --from-result
+    --policy-id ID              Akamai security policy id
+    --rule-id N                 Akamai custom rule id
+    --policy-version N          Akamai policy version
+    --control-instance ID       e.g. control-instance:akamai-production
+    --hostname HOST             protected hostname
+    --scope ID                  e.g. population-scope:prod-web
 `
+
+// parseInt64Flag exits with a clear message rather than silently using zero,
+// which would target Akamai rule 0.
+func parseInt64Flag(flag, value string) int64 {
+	n, err := strconv.ParseInt(strings.TrimSpace(value), 10, 64)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "xsiam-issue: %s must be a number, got %q\n", flag, value)
+		os.Exit(1)
+	}
+	return n
+}
+
+// issueFromControlTranslation resolves the rule from a control-translation result
+// and maps it into a DEPLOY issue. Identity fields that would normally come from
+// the orchestrator are left empty rather than invented; only the rule-derived
+// parts are filled here.
+func issueFromControlTranslation(path string, opts JanusPayloadOptions) (XSIAMIssue, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return XSIAMIssue{}, fmt.Errorf("read control-translation result: %w", err)
+	}
+	rule, err := ExtractCustomWAFRule(data)
+	if err != nil {
+		return XSIAMIssue{}, err
+	}
+	payload, err := JanusPayloadFromCustomWAFRule(rule, opts)
+	if err != nil {
+		return XSIAMIssue{}, err
+	}
+
+	var requestContext JanusRequestContext
+	requestContext.ContractID = "xsiam-execution-seam@0.9"
+	requestContext.SchemaVersion = "0.9"
+	requestContext.RequestedAction.Operation = "DEPLOY"
+	requestContext.RequestedAction.ActionProfile = "akamai-waf-policy-activation"
+	requestContext.RequestedAction.ActionProfileVersion = "2"
+	requestContext.RequestedAction.DesiredState = "ENFORCING"
+	requestContext.Subject.ThreatID = opts.CVE
+	requestContext.Target.ControlTechnology = rule.Technology
+	requestContext.Target.ControlInstanceID = opts.ControlInstanceID
+	requestContext.Target.ProtectedHostname = opts.ProtectedHostname
+	requestContext.Target.TargetScopeID = opts.TargetScopeID
+
+	fields := JanusCustomFields{
+		ContractID:            requestContext.ContractID,
+		SchemaVersion:         requestContext.SchemaVersion,
+		RequestContextVersion: "security-action-execution-request@0.9",
+		Operation:             "DEPLOY",
+		CapabilityOperation:   "enforce-on-pass",
+		ActionProfile:         "akamai-waf-policy-activation",
+		ActionProfileVersion:  "2",
+		ControlPlane:          rule.Technology,
+		Enforcement:           "ENFORCING",
+		CVE:                   opts.CVE,
+		TargetID:              opts.ControlInstanceID,
+		ProtectedHostname:     opts.ProtectedHostname,
+		TargetScopeID:         opts.TargetScopeID,
+		CandidateID:           payload.JanusBinding.CandidateID,
+		CandidateDigest:       payload.JanusBinding.CandidateDigest,
+		Justification:         "Enforce the validated " + rule.Technology + " candidate for " + opts.CVE + ".",
+	}
+	if err := fields.SetRequestContext(requestContext); err != nil {
+		return XSIAMIssue{}, err
+	}
+	if err := fields.SetPayload(payload); err != nil {
+		return XSIAMIssue{}, err
+	}
+
+	return XSIAMIssue{
+		Name:            "JANUS | " + strings.ToUpper(strings.ReplaceAll(rule.Technology, "-", "_")) + " | DEPLOY | " + opts.CVE,
+		Description:     "Switch one validated " + rule.Technology + " shadow rule to enforcement.",
+		ObservationTime: NowMillis(),
+		IssueDomain:     "Janus",
+		Category:        "CONFIGURATION",
+		Severity:        "HIGH",
+		CustomFields:    fields,
+	}, nil
+}
 
 // loadOrBuildIssue reads an issue from a file or stdin, or builds the example.
 func loadOrBuildIssue(path string) (XSIAMIssue, error) {

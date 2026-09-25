@@ -195,6 +195,43 @@ Two details the API is unforgiving about, both handled for you:
   bytes that get sent — no hand-escaping, and the hash can never drift from the
   content.
 
+#### Building the payload from a resolved rule
+
+`api/janus_payload.go` maps a control-translation Akamai rule set onto
+`januspayload`, end to end from the result row:
+
+```bash
+cd api && go run . xsiam-issue --from-result testdata/control-translation-result.json \
+  --cve CVE-2026-77392 --policy-id policy-1 --rule-id 60022381 --policy-version 43 \
+  --control-instance control-instance:akamai-production \
+  --hostname afo.example.com --scope population-scope:prod-web
+```
+
+The rule supplies **what** to enforce; the flags supply **where**. Akamai policy
+coordinates, target identifiers and the live-state hash are not in the artifact,
+so they are caller-supplied rather than invented — an invented one would target
+the wrong control.
+
+**The shapes do not line up on their own, and the gap is load-bearing.** A rule
+set is `combinationOperation: OR` over alternatives that are each an `AND` of
+conditions; XSIAM's `structured_rule` is a single rule with one operation. That
+collapse is only sound when the alternatives differ in **at most one** condition
+position:
+
+```
+(A ∧ B₁) ∨ (A ∧ B₂)   ==  A ∧ (B₁ ∨ B₂)          one position — exact
+(A₁ ∧ B₁) ∨ (A₂ ∧ B₂)  ≠  (A₁ ∨ A₂) ∧ (B₁ ∨ B₂)   two — also matches A₁ ∧ B₂
+```
+
+The second form would silently widen the rule and block traffic the validated
+candidate never covered, so it is **refused** with a message saying the set needs
+one issue per alternative. Mismatched condition shapes, a negated condition
+merging with a positive one, and alternatives that disagree on `sourceAction` are
+refused for the same reason.
+
+`realized_artifact_digest` is computed from the emitted `structured_rule`, so it
+always describes what is actually sent.
+
 `custom_fields` is a struct rather than a map, so a misspelled janus field is a
 compile error; XSIAM drops unknown custom fields silently, which would otherwise
 lose data with no signal. A non-2xx response returns an `*XSIAMError` carrying the
