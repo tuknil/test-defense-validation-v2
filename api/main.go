@@ -140,6 +140,11 @@ func main() {
 		controlTranslationCLI(os.Args[2:])
 		return
 	}
+	// CLI: build (and optionally send) an XSIAM enforcement issue.
+	if len(os.Args) > 1 && os.Args[1] == "xsiam-issue" {
+		xsiamIssueCLI(os.Args[2:])
+		return
+	}
 
 	s, err := NewRunStore()
 	if err != nil {

@@ -168,6 +168,40 @@ cd api && go run . control-translation-waf-rule testdata/control-translation-res
 It resolves `primary_candidate.artifact_id` against the `artifacts` map, verifies
 `content_hash`, and prints the rule with its provenance.
 
+### Creating an XSIAM enforcement issue
+
+`api/xsiam_issue.go` is a standalone client for `POST /public_api/v1/issue` — the
+outward-facing hand-off that carries an enforcement request into the execution
+seam. It depends only on the standard library.
+
+```bash
+cd api && go run . xsiam-issue            # print the exact POST body, send nothing
+go run . xsiam-issue issue.json           # same, from your own issue JSON ("-" for stdin)
+go run . xsiam-issue --send issue.json    # actually create the issue
+```
+
+Sending needs `XSIAM_HOST` (bare host, no scheme), `XSIAM_API_KEY_HEADER`,
+`XSIAM_API_KEY` and `XDR_AUTH_ID`. **Printing is the default**: creating an issue
+is outward-facing and cannot be undone from here, so it takes an explicit
+`--send`.
+
+Two details the API is unforgiving about, both handled for you:
+
+- `observation_time` is epoch **milliseconds**. Seconds would silently place the
+  issue in 1970.
+- `janusrequestcontext` and `januspayload` are JSON **strings** inside the JSON
+  body. Build them with `SetRequestContext` / `SetPayload`, which marshal the
+  typed document and set the matching `…hash` field to the sha256 of exactly the
+  bytes that get sent — no hand-escaping, and the hash can never drift from the
+  content.
+
+`custom_fields` is a struct rather than a map, so a misspelled janus field is a
+compile error; XSIAM drops unknown custom fields silently, which would otherwise
+lose data with no signal. A non-2xx response returns an `*XSIAMError` carrying the
+server's body, matching `curl --fail-with-body` — that body is usually the only
+way to tell a bad custom field from a bad credential. The API key is never logged
+or included in an error.
+
 
 ## Step 3 — Run ledger
 
