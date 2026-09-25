@@ -68,10 +68,13 @@ func TestPersistResolvedRuleRecordsAMissingSink(t *testing.T) {
 	ruleSink = nil
 	t.Cleanup(func() { ruleSink = previous })
 
-	out := persistResolvedRule(context.Background(), RunOutcome{
+	out, written := persistResolvedRule(context.Background(), RunOutcome{
 		RunID: "dv-run-1", ResultID: resultIDPrefix + "one", TerminalState: stateRuleResolved,
 		Candidate: &CandidateSpec{Kind: "waf-rule", Engine: "akamai-waf", Rule: "{}"},
 	})
+	if written {
+		t.Error("no sink is configured, so nothing was written")
+	}
 	if len(out.Limitations) == 0 || !strings.Contains(strings.Join(out.Limitations, " "), "not written to Databricks") {
 		t.Errorf("a skipped rule write must be recorded: %+v", out.Limitations)
 	}
@@ -88,11 +91,11 @@ func TestPersistResolvedRuleSkipsRunsWithoutARule(t *testing.T) {
 	ruleSink = nil
 	t.Cleanup(func() { ruleSink = previous })
 
-	failed := persistResolvedRule(context.Background(), RunOutcome{TerminalState: stateFailed})
+	failed, _ := persistResolvedRule(context.Background(), RunOutcome{TerminalState: stateFailed})
 	if len(failed.Limitations) != 0 {
 		t.Errorf("a failed run has no rule to write: %+v", failed.Limitations)
 	}
-	noRule := persistResolvedRule(context.Background(), RunOutcome{TerminalState: stateRuleResolved})
+	noRule, _ := persistResolvedRule(context.Background(), RunOutcome{TerminalState: stateRuleResolved})
 	if len(noRule.Limitations) != 0 {
 		t.Errorf("a run with no candidate has no rule to write: %+v", noRule.Limitations)
 	}

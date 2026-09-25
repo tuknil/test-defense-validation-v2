@@ -70,28 +70,28 @@ func (c akamaiCondition) shape() string {
 type JanusPayloadOptions struct {
 	// CVE labels the rule and tags it. Required: it is not derivable from the
 	// artifact, and a wrong or missing threat id makes the issue untriageable.
-	CVE string
+	CVE string `json:"cve"`
 
 	// Akamai policy coordinates for the rule being changed.
-	PolicyVersion int
-	PolicyID      string
-	RuleID        int64
+	PolicyVersion int    `json:"policy_version"`
+	PolicyID      string `json:"policy_id"`
+	RuleID        int64  `json:"rule_id"`
 
 	// Where the control lives.
-	ControlInstanceID string
-	ProtectedHostname string
-	TargetScopeID     string
+	ControlInstanceID string `json:"control_instance_id"`
+	ProtectedHostname string `json:"protected_hostname"`
+	TargetScopeID     string `json:"target_scope_id"`
 
 	// ExpectedCurrentAction is the action the policy is expected to be in now, so
 	// the execution seam can refuse a change it did not plan for. Defaults to
 	// "alert" — the shadow state a validated candidate is promoted from.
-	ExpectedCurrentAction string
+	ExpectedCurrentAction string `json:"expected_current_action,omitempty"`
 
 	// ExpectedLiveStateHash is the caller's hash of current live state. Left empty
 	// when the caller has not read live state; it is never invented here.
-	ExpectedLiveStateHash string
+	ExpectedLiveStateHash string `json:"expected_live_state_hash,omitempty"`
 
-	RecoverySpecRef string
+	RecoverySpecRef string `json:"recovery_spec_ref,omitempty"`
 }
 
 // JanusPayloadFromCustomWAFRule builds the januspayload document from a resolved

@@ -193,6 +193,54 @@ _ = WriteCustomWAFRule(os.Stdout, rule)         // print
 res, err := PostIssueForRule(ctx, rule, opts)   // map -> issue -> POST
 ```
 
+### Posting the enforcement issue from a run
+
+A run can hand the resolved rule straight to XSIAM. Add an `enforcement` object to
+the submission; omit it and nothing is posted.
+
+```jsonc
+{
+  "contract_id": "defense-validation@1.0",
+  // … the usual fields …
+  "enforcement": {
+    "cve": "CVE-2026-77392",
+    "policy_id": "policy-1",
+    "rule_id": 60022381,
+    "policy_version": 43,
+    "control_instance_id": "control-instance:akamai-production",
+    "protected_hostname": "afo.example.com",
+    "target_scope_id": "population-scope:prod-web",
+    "change_ref": "servicenow-change:CHG0123456"
+  }
+}
+```
+
+The order is **rule row written → issue posted**. An issue names a candidate the
+execution seam is expected to look up, so it is never posted before that row
+exists; when the write is skipped or fails, the skip is recorded:
+
+```
+"No enforcement issue was posted: the rule row was not written, and an issue
+ must not name a candidate that cannot be looked up."
+```
+
+**Credentials stay in the environment** (`XSIAM_HOST`, `XSIAM_API_KEY_HEADER`,
+`XSIAM_API_KEY`, `XDR_AUTH_ID`). They are deployment state, not request data — a
+caller must not be able to redirect a hand-off to another tenant by changing a
+body. Everything the rule artifact cannot supply comes from the `enforcement`
+JSON; unknown keys in it are rejected, since a mistyped one would otherwise be
+dropped and the issue posted with that value missing.
+
+Identity comes from the **run**, not the body: `januscorrelationid`,
+`janusrequestid` and `januscausationid` are the run's own, and
+`janusidempotencykey` is the result id — so a replayed run resolving the same
+result cannot create a second issue.
+
+A posting failure **does not fail the run**. The rule is already resolved,
+verified and durably written; losing the hand-off is a delivery problem, and
+reporting the run as failed would misdescribe what happened. It lands in
+`limitations` instead, never swallowed.
+
 ### Creating an XSIAM enforcement issue
 
 `api/xsiam_issue.go` is a standalone client for `POST /public_api/v1/issue` — the

@@ -331,6 +331,41 @@ components:
             and shared-contract routes reject caller-supplied bodies. Inline mode
             carries no producer lineage, so the rule is not verified against any
             upstream result.
+        enforcement:
+          type: object
+          description: >
+            Opts this run into posting an XSIAM enforcement issue once the rule is
+            resolved and its Databricks rule row is written. Omit it and nothing is
+            posted. XSIAM credentials are NOT taken from here — they come from the
+            server environment, so a request cannot redirect the hand-off to
+            another tenant. Unknown properties are rejected: a mistyped key would
+            otherwise be dropped and the issue posted with that value missing.
+          additionalProperties: false
+          required: [cve]
+          properties:
+            cve: { type: string, example: CVE-2026-77392 }
+            policy_id: { type: string, example: policy-1 }
+            rule_id: { type: integer, format: int64, example: 60022381 }
+            policy_version: { type: integer, example: 43 }
+            control_instance_id: { type: string, example: "control-instance:akamai-production" }
+            protected_hostname: { type: string, example: afo.example.com }
+            target_scope_id: { type: string, example: "population-scope:prod-web" }
+            expected_current_action:
+              type: string
+              default: alert
+              description: The action the policy is expected to be in now.
+            expected_live_state_hash:
+              type: string
+              description: Caller's hash of current live state. Never invented when absent.
+            recovery_spec_ref: { type: string }
+            severity: { type: string, default: HIGH }
+            change_ref: { type: string, example: "servicenow-change:CHG0123456" }
+            justification: { type: string }
+            authorization_id: { type: string }
+            authorization_artifact_id: { type: string }
+            authorization_status: { type: string }
+            recovery_authorized: { type: boolean }
+            expires_at: { type: string, format: date-time }
         upstream_inputs:
           type: array
           description: >
@@ -550,6 +585,41 @@ components:
           type: string
           pattern: "^sha256:[0-9a-f]{64}$"
           description: SHA-256 of the normalized request bound to the idempotency key.
+        enforcement:
+          type: object
+          description: >
+            Opts this run into posting an XSIAM enforcement issue once the rule is
+            resolved and its Databricks rule row is written. Omit it and nothing is
+            posted. XSIAM credentials are NOT taken from here — they come from the
+            server environment, so a request cannot redirect the hand-off to
+            another tenant. Unknown properties are rejected: a mistyped key would
+            otherwise be dropped and the issue posted with that value missing.
+          additionalProperties: false
+          required: [cve]
+          properties:
+            cve: { type: string, example: CVE-2026-77392 }
+            policy_id: { type: string, example: policy-1 }
+            rule_id: { type: integer, format: int64, example: 60022381 }
+            policy_version: { type: integer, example: 43 }
+            control_instance_id: { type: string, example: "control-instance:akamai-production" }
+            protected_hostname: { type: string, example: afo.example.com }
+            target_scope_id: { type: string, example: "population-scope:prod-web" }
+            expected_current_action:
+              type: string
+              default: alert
+              description: The action the policy is expected to be in now.
+            expected_live_state_hash:
+              type: string
+              description: Caller's hash of current live state. Never invented when absent.
+            recovery_spec_ref: { type: string }
+            severity: { type: string, default: HIGH }
+            change_ref: { type: string, example: "servicenow-change:CHG0123456" }
+            justification: { type: string }
+            authorization_id: { type: string }
+            authorization_artifact_id: { type: string }
+            authorization_status: { type: string }
+            recovery_authorized: { type: boolean }
+            expires_at: { type: string, format: date-time }
         upstream_inputs:
           type: array
           description: Exact authoritative upstream result identities the rule was resolved from.

@@ -166,13 +166,22 @@ func issueFromControlTranslation(path string, opts JanusPayloadOptions) (XSIAMIs
 	return IssueFromCustomWAFRule(rule, opts)
 }
 
-// IssueFromCustomWAFRule maps an already-resolved rule into a DEPLOY issue.
-//
-// Identity fields that belong to the orchestrator — request, correlation and
-// causation ids, the authorization chain, the change reference — are left empty
-// rather than generated here. A fabricated correlation id would break the very
-// lineage the issue exists to carry.
+// IssueFromCustomWAFRule maps an already-resolved rule into a DEPLOY issue with
+// no orchestrator identity. Use IssueForEnforcement when the caller has one: an
+// issue without a correlation id cannot be traced back to the run that produced
+// the rule.
 func IssueFromCustomWAFRule(rule CustomWAFRule, opts JanusPayloadOptions) (XSIAMIssue, error) {
+	return IssueForEnforcement(rule, EnforcementInput{JanusPayloadOptions: opts}, IssueIdentity{})
+}
+
+// IssueForEnforcement maps a resolved rule, the caller's enforcement input and
+// the run's identity into a DEPLOY issue.
+//
+// Identity is taken from the run rather than generated: a fabricated correlation
+// id would break the lineage the issue exists to carry, so an absent one stays
+// absent.
+func IssueForEnforcement(rule CustomWAFRule, input EnforcementInput, identity IssueIdentity) (XSIAMIssue, error) {
+	opts := input.JanusPayloadOptions
 	payload, err := JanusPayloadFromCustomWAFRule(rule, opts)
 	if err != nil {
 		return XSIAMIssue{}, err
@@ -181,6 +190,10 @@ func IssueFromCustomWAFRule(rule CustomWAFRule, opts JanusPayloadOptions) (XSIAM
 	var requestContext JanusRequestContext
 	requestContext.ContractID = "xsiam-execution-seam@0.9"
 	requestContext.SchemaVersion = "0.9"
+	requestContext.RequestID = identity.RequestID
+	requestContext.CorrelationID = identity.CorrelationID
+	requestContext.CausationID = identity.CausationID
+	requestContext.ExpiresAt = input.ExpiresAt
 	requestContext.RequestedAction.Operation = "DEPLOY"
 	requestContext.RequestedAction.ActionProfile = "akamai-waf-policy-activation"
 	requestContext.RequestedAction.ActionProfileVersion = "2"
@@ -192,6 +205,9 @@ func IssueFromCustomWAFRule(rule CustomWAFRule, opts JanusPayloadOptions) (XSIAM
 	requestContext.Target.TargetScopeID = opts.TargetScopeID
 
 	fields := JanusCustomFields{
+		RequestID:             identity.RequestID,
+		CorrelationID:         identity.CorrelationID,
+		CausationID:           identity.CausationID,
 		ContractID:            requestContext.ContractID,
 		SchemaVersion:         requestContext.SchemaVersion,
 		RequestContextVersion: "security-action-execution-request@0.9",
@@ -205,9 +221,21 @@ func IssueFromCustomWAFRule(rule CustomWAFRule, opts JanusPayloadOptions) (XSIAM
 		TargetID:              opts.ControlInstanceID,
 		ProtectedHostname:     opts.ProtectedHostname,
 		TargetScopeID:         opts.TargetScopeID,
+		TargetEnvironment:     targetEnvironmentFor(opts.TargetScopeID),
 		CandidateID:           payload.JanusBinding.CandidateID,
 		CandidateDigest:       payload.JanusBinding.CandidateDigest,
-		Justification:         "Enforce the validated " + rule.Technology + " candidate for " + opts.CVE + ".",
+		CRRef:                 input.ChangeRef,
+
+		AuthorizationID:         input.AuthorizationID,
+		AuthorizationArtifactID: input.AuthorizationArtifactID,
+		AuthorizationStatus:     input.AuthorizationStatus,
+		RecoveryAuthorized:      input.RecoveryAuthorized,
+
+		IdempotencyKey: identity.IdempotencyKey,
+		ExpiresAt:      input.ExpiresAt,
+
+		Justification: firstNonEmpty(input.Justification,
+			"Enforce the validated "+rule.Technology+" candidate for "+opts.CVE+"."),
 	}
 	if err := fields.SetRequestContext(requestContext); err != nil {
 		return XSIAMIssue{}, err
@@ -222,9 +250,28 @@ func IssueFromCustomWAFRule(rule CustomWAFRule, opts JanusPayloadOptions) (XSIAM
 		ObservationTime: NowMillis(),
 		IssueDomain:     "Janus",
 		Category:        "CONFIGURATION",
-		Severity:        "HIGH",
+		Severity:        firstNonEmpty(input.Severity, "HIGH"),
 		CustomFields:    fields,
 	}, nil
+}
+
+// targetEnvironmentFor reads the environment out of a population scope id such as
+// "population-scope:prod-web". It is left empty when the scope does not say, since
+// mislabelling production is worse than labelling nothing.
+func targetEnvironmentFor(scopeID string) string {
+	_, suffix, found := strings.Cut(scopeID, ":")
+	if !found {
+		return ""
+	}
+	switch {
+	case strings.HasPrefix(suffix, "prod"):
+		return "production"
+	case strings.HasPrefix(suffix, "stag"):
+		return "staging"
+	case strings.HasPrefix(suffix, "dev"):
+		return "development"
+	}
+	return ""
 }
 
 // PostIssueForRule builds the enforcement issue for a resolved rule and posts it
@@ -233,7 +280,16 @@ func IssueFromCustomWAFRule(rule CustomWAFRule, opts JanusPayloadOptions) (XSIAM
 // This performs an outward-facing, irreversible create. Callers that only want to
 // inspect the request should use IssueFromCustomWAFRule with EncodeIssue instead.
 func PostIssueForRule(ctx context.Context, rule CustomWAFRule, opts JanusPayloadOptions) (map[string]any, error) {
-	issue, err := IssueFromCustomWAFRule(rule, opts)
+	return PostEnforcementIssue(ctx, rule, EnforcementInput{JanusPayloadOptions: opts}, IssueIdentity{})
+}
+
+// PostEnforcementIssue builds the issue for a resolved rule and posts it to
+// XSIAM, reading the tenant configuration from the environment.
+//
+// The issue is built before the client is configured, so a rule that cannot be
+// mapped fails without any request being attempted.
+func PostEnforcementIssue(ctx context.Context, rule CustomWAFRule, input EnforcementInput, identity IssueIdentity) (map[string]any, error) {
+	issue, err := IssueForEnforcement(rule, input, identity)
 	if err != nil {
 		return nil, err
 	}

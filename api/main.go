@@ -61,6 +61,13 @@ type SubmitDefenseValidationRequest struct {
 	Candidate      json.RawMessage `json:"candidate,omitempty"`
 	// CorrelationID is echoed into the result envelope (optional).
 	CorrelationID string `json:"correlation_id,omitempty"`
+	// Enforcement opts this run into posting an XSIAM enforcement issue once the
+	// rule is resolved and its Databricks row is written. It carries everything
+	// the rule artifact cannot supply — CVE, Akamai policy coordinates, target
+	// identifiers; see EnforcementInput. XSIAM credentials are never taken from
+	// here: they come from the environment, so a request cannot redirect the
+	// hand-off to another tenant. Omit it and nothing is posted.
+	Enforcement json.RawMessage `json:"enforcement,omitempty"`
 	// Reference-only mode is additive and mutually exclusive with inline artifacts
 	// and legacy upstream_inputs. Both immutable producer locators are resolved and
 	// verified only when this mode is selected.
